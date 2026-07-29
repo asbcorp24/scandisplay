@@ -1,11 +1,11 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <winhttp.h>
-#include <gdiplus.h>
 #include <commctrl.h>
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -16,7 +16,6 @@
 #include <thread>
 #include <vector>
 
-#pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "comctl32.lib")
@@ -29,6 +28,7 @@ constexpr wchar_t kMainWindowClass[] = L"ScanDisplayMainWindow";
 constexpr wchar_t kAuthWindowClass[] = L"ScanDisplayAuthWindow";
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kFinalizeMessage = WM_APP + 2;
+constexpr UINT kCaptureFailedMessage = WM_APP + 3;
 constexpr UINT kTrayId = 1;
 
 constexpr UINT kMenuAuth = 1001;
@@ -44,13 +44,12 @@ HWND g_authWindow = nullptr;
 HWND g_authEdit = nullptr;
 HWND g_authStatus = nullptr;
 NOTIFYICONDATAW g_tray{};
-ULONG_PTR g_gdiplusToken = 0;
 
 struct Config {
     std::wstring baseUrl;
     std::wstring ffmpegPath;
     fs::path outputDir;
-    bool keepFrames = false;
+    bool deleteAfterUpload = false;
     DWORD timeoutMs = 120000;
 };
 
@@ -70,13 +69,25 @@ enum class AppState { Idle, Recording, Finalizing };
 
 Config g_config;
 StudentSession g_student;
+StudentSession g_recordingStudent;
 std::mutex g_studentMutex;
 std::atomic<AppState> g_state{AppState::Idle};
 std::atomic_bool g_stopCapture{false};
 std::thread g_captureThread;
 std::thread g_finalizeThread;
-fs::path g_sessionDir;
+std::condition_variable g_captureWake;
+std::mutex g_captureWakeMutex;
+std::mutex g_captureErrorMutex;
+std::wstring g_captureError;
+
+HANDLE g_ffmpegInput = INVALID_HANDLE_VALUE;
+PROCESS_INFORMATION g_ffmpegProcess{};
+fs::path g_outputFile;
 std::wstring g_startedAt;
+int g_screenX = 0;
+int g_screenY = 0;
+int g_screenWidth = 0;
+int g_screenHeight = 0;
 
 std::wstring ModuleDirectory() {
     std::vector<wchar_t> buffer(32768);
@@ -108,7 +119,7 @@ bool LoadConfig(std::wstring& error) {
     g_config.baseUrl = ReadIni(configPath, L"server", L"base_url", L"");
     g_config.ffmpegPath = ExpandEnvironment(ReadIni(configPath, L"recording", L"ffmpeg_path", L"ffmpeg.exe"));
     g_config.outputDir = ExpandEnvironment(ReadIni(configPath, L"recording", L"output_dir", L"%LOCALAPPDATA%\\ScanDisplay\\recordings"));
-    g_config.keepFrames = ReadIni(configPath, L"recording", L"keep_frames", L"0") == L"1";
+    g_config.deleteAfterUpload = ReadIni(configPath, L"recording", L"delete_after_upload", L"0") == L"1";
 
     try {
         const int seconds = std::stoi(ReadIni(configPath, L"client", L"request_timeout_seconds", L"120"));
@@ -120,6 +131,10 @@ bool LoadConfig(std::wstring& error) {
     while (!g_config.baseUrl.empty() && g_config.baseUrl.back() == L'/') g_config.baseUrl.pop_back();
     if (g_config.baseUrl.empty()) {
         error = L"В config.ini не задан server.base_url.";
+        return false;
+    }
+    if (!fs::exists(g_config.ffmpegPath)) {
+        error = L"FFmpeg не найден: " + g_config.ffmpegPath;
         return false;
     }
 
@@ -141,15 +156,14 @@ fs::path SessionFile() {
     return dir / L"session.ini";
 }
 
-void SaveSession() {
-    std::lock_guard<std::mutex> lock(g_studentMutex);
+void SaveSession(const StudentSession& session) {
     const fs::path file = SessionFile();
-    WritePrivateProfileStringW(L"student", L"id", std::to_wstring(g_student.id).c_str(), file.c_str());
-    WritePrivateProfileStringW(L"student", L"code", g_student.code.c_str(), file.c_str());
-    WritePrivateProfileStringW(L"student", L"first_name", g_student.firstName.c_str(), file.c_str());
-    WritePrivateProfileStringW(L"student", L"last_name", g_student.lastName.c_str(), file.c_str());
-    WritePrivateProfileStringW(L"student", L"group_name", g_student.groupName.c_str(), file.c_str());
-    WritePrivateProfileStringW(L"student", L"token", g_student.token.c_str(), file.c_str());
+    WritePrivateProfileStringW(L"student", L"id", std::to_wstring(session.id).c_str(), file.c_str());
+    WritePrivateProfileStringW(L"student", L"code", session.code.c_str(), file.c_str());
+    WritePrivateProfileStringW(L"student", L"first_name", session.firstName.c_str(), file.c_str());
+    WritePrivateProfileStringW(L"student", L"last_name", session.lastName.c_str(), file.c_str());
+    WritePrivateProfileStringW(L"student", L"group_name", session.groupName.c_str(), file.c_str());
+    WritePrivateProfileStringW(L"student", L"token", session.token.c_str(), file.c_str());
 }
 
 void LoadSession() {
@@ -171,7 +185,8 @@ void LoadSession() {
 std::string WideToUtf8(const std::wstring& value) {
     if (value.empty()) return {};
     const int size = WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
-    std::string result(size, '\0');
+    if (size <= 0) return {};
+    std::string result(static_cast<size_t>(size), '\0');
     WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), result.data(), size, nullptr, nullptr);
     return result;
 }
@@ -179,7 +194,8 @@ std::string WideToUtf8(const std::wstring& value) {
 std::wstring Utf8ToWide(const std::string& value) {
     if (value.empty()) return {};
     const int size = MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0);
-    std::wstring result(size, L'\0');
+    if (size <= 0) return {};
+    std::wstring result(static_cast<size_t>(size), L'\0');
     MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), result.data(), size);
     return result;
 }
@@ -188,7 +204,8 @@ std::string UrlEncode(const std::string& value) {
     std::ostringstream output;
     output << std::uppercase << std::hex;
     for (const unsigned char c : value) {
-        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
             output << static_cast<char>(c);
         } else {
             output << '%' << std::setw(2) << std::setfill('0') << static_cast<int>(c);
@@ -199,8 +216,7 @@ std::string UrlEncode(const std::string& value) {
 
 std::wstring JoinUrl(const std::wstring& base, const wchar_t* endpoint) {
     if (!endpoint || !*endpoint) return base;
-    if (endpoint[0] == L'/') return base + endpoint;
-    return base + L"/" + endpoint;
+    return endpoint[0] == L'/' ? base + endpoint : base + L"/" + endpoint;
 }
 
 struct ParsedUrl {
@@ -242,7 +258,8 @@ HttpResponse HttpPost(const std::wstring& url, const std::wstring& headers, cons
         return response;
     }
 
-    HINTERNET session = WinHttpOpen(L"ScanDisplay/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    HINTERNET session = WinHttpOpen(L"ScanDisplay/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session) {
         response.error = L"WinHttpOpen: " + std::to_wstring(GetLastError());
         return response;
@@ -250,8 +267,8 @@ HttpResponse HttpPost(const std::wstring& url, const std::wstring& headers, cons
     WinHttpSetTimeouts(session, g_config.timeoutMs, g_config.timeoutMs, g_config.timeoutMs, g_config.timeoutMs);
 
     HINTERNET connection = WinHttpConnect(session, parsed.host.c_str(), parsed.port, 0);
-    HINTERNET request = connection ? WinHttpOpenRequest(connection, L"POST", parsed.path.c_str(), nullptr, WINHTTP_NO_REFERER,
-        WINHTTP_DEFAULT_ACCEPT_TYPES, parsed.secure ? WINHTTP_FLAG_SECURE : 0) : nullptr;
+    HINTERNET request = connection ? WinHttpOpenRequest(connection, L"POST", parsed.path.c_str(), nullptr,
+        WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, parsed.secure ? WINHTTP_FLAG_SECURE : 0) : nullptr;
 
     if (!connection || !request) {
         response.error = L"Не удалось создать HTTP-запрос: " + std::to_wstring(GetLastError());
@@ -263,7 +280,8 @@ HttpResponse HttpPost(const std::wstring& url, const std::wstring& headers, cons
             response.error = L"Ошибка связи с сервером: " + std::to_wstring(GetLastError());
         } else {
             DWORD size = sizeof(response.status);
-            WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, nullptr, &response.status, &size, nullptr);
+            WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                nullptr, &response.status, &size, nullptr);
             for (;;) {
                 DWORD available = 0;
                 if (!WinHttpQueryDataAvailable(request, &available) || available == 0) break;
@@ -333,7 +351,8 @@ std::wstring ComputerName() {
 }
 
 bool Authenticate(const std::wstring& code, std::wstring& error) {
-    const std::string form = "code=" + UrlEncode(WideToUtf8(code)) + "&computer_name=" + UrlEncode(WideToUtf8(ComputerName()));
+    const std::string form = "code=" + UrlEncode(WideToUtf8(code)) +
+        "&computer_name=" + UrlEncode(WideToUtf8(ComputerName()));
     const std::vector<std::uint8_t> body(form.begin(), form.end());
     const HttpResponse response = HttpPost(JoinUrl(g_config.baseUrl, L"/api/auth.php"),
         L"Content-Type: application/x-www-form-urlencoded; charset=utf-8\r\n", body);
@@ -362,158 +381,194 @@ bool Authenticate(const std::wstring& code, std::wstring& error) {
 
     {
         std::lock_guard<std::mutex> lock(g_studentMutex);
-        g_student = std::move(session);
+        g_student = session;
     }
-    SaveSession();
+    SaveSession(session);
     return true;
 }
 
-std::wstring LocalTimestamp(const wchar_t* format) {
+std::wstring TimestampIso() {
     SYSTEMTIME st{};
     GetLocalTime(&st);
-    wchar_t buffer[128]{};
-    swprintf_s(buffer, format, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    wchar_t buffer[64]{};
+    swprintf_s(buffer, _countof(buffer), L"%04u-%02u-%02u %02u:%02u:%02u",
+        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
     return buffer;
 }
 
-bool SaveBitmap32(HDC dc, HBITMAP bitmap, int width, int height, const fs::path& file) {
+std::wstring TimestampFolder() {
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+    wchar_t buffer[64]{};
+    swprintf_s(buffer, _countof(buffer), L"%04u%02u%02u_%02u%02u%02u",
+        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    return buffer;
+}
+
+std::wstring TimestampOverlay() {
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+    wchar_t buffer[64]{};
+    swprintf_s(buffer, _countof(buffer), L"%02u.%02u.%04u %02u:%02u:%02u",
+        st.wDay, st.wMonth, st.wYear, st.wHour, st.wMinute, st.wSecond);
+    return buffer;
+}
+
+void SetCaptureError(const std::wstring& error) {
+    std::lock_guard<std::mutex> lock(g_captureErrorMutex);
+    if (g_captureError.empty()) g_captureError = error;
+}
+
+std::wstring GetCaptureError() {
+    std::lock_guard<std::mutex> lock(g_captureErrorMutex);
+    return g_captureError;
+}
+
+bool WriteHandleAll(HANDLE handle, const void* data, std::uint64_t size) {
+    const auto* bytes = static_cast<const std::uint8_t*>(data);
+    std::uint64_t total = 0;
+    while (total < size) {
+        const DWORD part = static_cast<DWORD>(min<std::uint64_t>(size - total, 1024ULL * 1024ULL));
+        DWORD written = 0;
+        if (!WriteFile(handle, bytes + total, part, &written, nullptr) || written == 0) return false;
+        total += written;
+    }
+    return true;
+}
+
+bool StartFfmpeg(const fs::path& outputFile, std::wstring& error) {
+    SECURITY_ATTRIBUTES security{};
+    security.nLength = sizeof(security);
+    security.bInheritHandle = TRUE;
+
+    HANDLE readPipe = INVALID_HANDLE_VALUE;
+    HANDLE writePipe = INVALID_HANDLE_VALUE;
+    if (!CreatePipe(&readPipe, &writePipe, &security, 0)) {
+        error = L"Не удалось создать канал FFmpeg: " + std::to_wstring(GetLastError());
+        return false;
+    }
+    SetHandleInformation(writePipe, HANDLE_FLAG_INHERIT, 0);
+
+    HANDLE nullOutput = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        &security, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+
+    std::wstringstream command;
+    command << L'"' << g_config.ffmpegPath << L"\" -y -hide_banner -loglevel error "
+            << L"-f rawvideo -pix_fmt bgr0 -video_size " << g_screenWidth << L"x" << g_screenHeight << L" "
+            << L"-framerate 1 -i pipe:0 -an -vf fps=25 -c:v libx264 -preset veryfast -crf 23 "
+            << L"-pix_fmt yuv420p -movflags +faststart \"" << outputFile.wstring() << L"\"";
+    std::vector<wchar_t> mutableCommand(command.str().begin(), command.str().end());
+    mutableCommand.push_back(L'\0');
+
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdInput = readPipe;
+    startup.hStdOutput = nullOutput != INVALID_HANDLE_VALUE ? nullOutput : GetStdHandle(STD_OUTPUT_HANDLE);
+    startup.hStdError = nullOutput != INVALID_HANDLE_VALUE ? nullOutput : GetStdHandle(STD_ERROR_HANDLE);
+
+    PROCESS_INFORMATION process{};
+    const BOOL started = CreateProcessW(g_config.ffmpegPath.c_str(), mutableCommand.data(), nullptr, nullptr, TRUE,
+        CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process);
+
+    CloseHandle(readPipe);
+    if (nullOutput != INVALID_HANDLE_VALUE) CloseHandle(nullOutput);
+
+    if (!started) {
+        CloseHandle(writePipe);
+        error = L"Не удалось запустить FFmpeg: " + std::to_wstring(GetLastError());
+        return false;
+    }
+
+    g_ffmpegInput = writePipe;
+    g_ffmpegProcess = process;
+    return true;
+}
+
+void CaptureLoop(StudentSession student) {
+    HDC screen = GetDC(nullptr);
+    HDC memory = screen ? CreateCompatibleDC(screen) : nullptr;
+
     BITMAPINFO info{};
     info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    info.bmiHeader.biWidth = width;
-    info.bmiHeader.biHeight = -height;
+    info.bmiHeader.biWidth = g_screenWidth;
+    info.bmiHeader.biHeight = -g_screenHeight;
     info.bmiHeader.biPlanes = 1;
     info.bmiHeader.biBitCount = 32;
     info.bmiHeader.biCompression = BI_RGB;
 
-    const std::uint64_t pixelBytes = static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height) * 4ULL;
-    if (pixelBytes > static_cast<std::uint64_t>(SIZE_MAX)) return false;
-    std::vector<std::uint8_t> pixels(static_cast<size_t>(pixelBytes));
-    if (GetDIBits(dc, bitmap, 0, static_cast<UINT>(height), pixels.data(), &info, DIB_RGB_COLORS) == 0) return false;
-
-    BITMAPFILEHEADER header{};
-    header.bfType = 0x4D42;
-    header.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
-    header.bfSize = static_cast<DWORD>(header.bfOffBits + pixels.size());
-
-    std::ofstream output(file, std::ios::binary);
-    if (!output) return false;
-    output.write(reinterpret_cast<const char*>(&header), sizeof(header));
-    output.write(reinterpret_cast<const char*>(&info.bmiHeader), sizeof(info.bmiHeader));
-    output.write(reinterpret_cast<const char*>(pixels.data()), static_cast<std::streamsize>(pixels.size()));
-    return output.good();
-}
-
-bool CaptureScreen(const fs::path& file, const StudentSession& student, std::wstring& error) {
-    const int x = GetSystemMetrics(SM_XVIRTUALSCREEN);
-    const int y = GetSystemMetrics(SM_YVIRTUALSCREEN);
-    const int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-    const int height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-    if (width <= 0 || height <= 0) {
-        error = L"Не удалось определить размер экрана.";
-        return false;
-    }
-
-    HDC screen = GetDC(nullptr);
-    HDC memory = screen ? CreateCompatibleDC(screen) : nullptr;
-    HBITMAP bitmap = memory ? CreateCompatibleBitmap(screen, width, height) : nullptr;
-    if (!screen || !memory || !bitmap) {
+    void* pixels = nullptr;
+    HBITMAP bitmap = memory ? CreateDIBSection(screen, &info, DIB_RGB_COLORS, &pixels, nullptr, 0) : nullptr;
+    if (!screen || !memory || !bitmap || !pixels) {
         if (bitmap) DeleteObject(bitmap);
         if (memory) DeleteDC(memory);
         if (screen) ReleaseDC(nullptr, screen);
-        error = L"Не удалось создать буфер снимка экрана.";
-        return false;
+        SetCaptureError(L"Не удалось создать буфер снимка экрана.");
+        if (g_ffmpegInput != INVALID_HANDLE_VALUE) {
+            CloseHandle(g_ffmpegInput);
+            g_ffmpegInput = INVALID_HANDLE_VALUE;
+        }
+        PostMessageW(g_mainWindow, kCaptureFailedMessage, 0, 0);
+        return;
     }
 
     HGDIOBJ oldBitmap = SelectObject(memory, bitmap);
-    const BOOL copied = BitBlt(memory, 0, 0, width, height, screen, x, y, SRCCOPY | CAPTUREBLT);
-    if (copied) {
-        const int boxHeight = 78;
-        RECT box{12, 12, width - 12, 12 + boxHeight};
+    const int fontHeight = max(22, g_screenHeight / 55);
+    HFONT font = CreateFontW(fontHeight, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    HGDIOBJ oldFont = SelectObject(memory, font);
+    const std::uint64_t frameBytes = static_cast<std::uint64_t>(g_screenWidth) *
+        static_cast<std::uint64_t>(g_screenHeight) * 4ULL;
+
+    auto nextFrame = std::chrono::steady_clock::now();
+    while (!g_stopCapture.load()) {
+        if (!BitBlt(memory, 0, 0, g_screenWidth, g_screenHeight, screen,
+            g_screenX, g_screenY, SRCCOPY | CAPTUREBLT)) {
+            SetCaptureError(L"Windows не позволила получить снимок экрана.");
+            PostMessageW(g_mainWindow, kCaptureFailedMessage, 0, 0);
+            break;
+        }
+
+        const int boxHeight = fontHeight * 2 + 28;
+        RECT box{12, 12, g_screenWidth - 12, 12 + boxHeight};
         HBRUSH background = CreateSolidBrush(RGB(0, 0, 0));
         FillRect(memory, &box, background);
         DeleteObject(background);
 
         SetBkMode(memory, TRANSPARENT);
         SetTextColor(memory, RGB(255, 255, 255));
-        HFONT font = CreateFontW(24, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-        HGDIOBJ oldFont = SelectObject(memory, font);
-
         const std::wstring line1 = L"Группа: " + student.groupName + L"    Студент: " + student.fullName();
-        const std::wstring line2 = L"Время: " + LocalTimestamp(L"%02u.%02u.%04u %02u:%02u:%02u");
-        RECT text1{26, 18, width - 24, 48};
-        RECT text2{26, 48, width - 24, 76};
+        const std::wstring line2 = L"Время: " + TimestampOverlay();
+        RECT text1{26, 16, g_screenWidth - 24, 18 + fontHeight + 8};
+        RECT text2{26, 20 + fontHeight, g_screenWidth - 24, 22 + fontHeight * 2 + 8};
         DrawTextW(memory, line1.c_str(), -1, &text1, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_VCENTER);
         DrawTextW(memory, line2.c_str(), -1, &text2, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
 
-        SelectObject(memory, oldFont);
-        DeleteObject(font);
+        if (!WriteHandleAll(g_ffmpegInput, pixels, frameBytes)) {
+            if (!g_stopCapture.load()) {
+                SetCaptureError(L"FFmpeg прекратил принимать кадры.");
+                PostMessageW(g_mainWindow, kCaptureFailedMessage, 0, 0);
+            }
+            break;
+        }
+
+        nextFrame += std::chrono::seconds(1);
+        std::unique_lock<std::mutex> waitLock(g_captureWakeMutex);
+        g_captureWake.wait_until(waitLock, nextFrame, [] { return g_stopCapture.load(); });
     }
 
-    const bool saved = copied && SaveBitmap32(memory, bitmap, width, height, file);
+    SelectObject(memory, oldFont);
     SelectObject(memory, oldBitmap);
+    DeleteObject(font);
     DeleteObject(bitmap);
     DeleteDC(memory);
     ReleaseDC(nullptr, screen);
 
-    if (!saved) error = L"Не удалось сохранить снимок экрана.";
-    return saved;
-}
-
-void CaptureLoop(fs::path directory, StudentSession student) {
-    std::uint64_t frame = 1;
-    while (!g_stopCapture.load()) {
-        std::wstringstream name;
-        name << L"frame_" << std::setw(6) << std::setfill(L'0') << frame << L".bmp";
-        std::wstring error;
-        CaptureScreen(directory / name.str(), student, error);
-        ++frame;
-
-        for (int i = 0; i < 10 && !g_stopCapture.load(); ++i) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
+    if (g_ffmpegInput != INVALID_HANDLE_VALUE) {
+        CloseHandle(g_ffmpegInput);
+        g_ffmpegInput = INVALID_HANDLE_VALUE;
     }
-}
-
-bool RunHiddenProcess(const std::wstring& commandLine, DWORD& exitCode, std::wstring& error) {
-    std::vector<wchar_t> mutableCommand(commandLine.begin(), commandLine.end());
-    mutableCommand.push_back(L'\0');
-
-    STARTUPINFOW startup{};
-    startup.cb = sizeof(startup);
-    PROCESS_INFORMATION process{};
-    if (!CreateProcessW(nullptr, mutableCommand.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) {
-        error = L"Не удалось запустить FFmpeg: " + std::to_wstring(GetLastError());
-        return false;
-    }
-
-    WaitForSingleObject(process.hProcess, INFINITE);
-    GetExitCodeProcess(process.hProcess, &exitCode);
-    CloseHandle(process.hThread);
-    CloseHandle(process.hProcess);
-    if (exitCode != 0) {
-        error = L"FFmpeg завершился с кодом " + std::to_wstring(exitCode) + L".";
-        return false;
-    }
-    return true;
-}
-
-bool EncodeVideo(const fs::path& directory, fs::path& outputFile, std::wstring& error) {
-    if (!fs::exists(g_config.ffmpegPath)) {
-        error = L"FFmpeg не найден: " + g_config.ffmpegPath;
-        return false;
-    }
-
-    outputFile = directory / L"recording.mp4";
-    const fs::path pattern = directory / L"frame_%06d.bmp";
-    std::wstringstream command;
-    command << L'"' << g_config.ffmpegPath << L"\" -y -hide_banner -loglevel error "
-            << L"-framerate 1 -i \"" << pattern.wstring() << L"\" "
-            << L"-c:v libx264 -preset veryfast -crf 23 -r 25 -pix_fmt yuv420p -movflags +faststart \""
-            << outputFile.wstring() << L"\"";
-
-    DWORD exitCode = 0;
-    return RunHiddenProcess(command.str(), exitCode, error) && fs::exists(outputFile);
 }
 
 bool WriteHttpData(HINTERNET request, const void* data, DWORD size) {
@@ -540,19 +595,20 @@ bool UploadVideo(const fs::path& file, const std::wstring& startedAt, const std:
         error = L"Не удалось открыть созданное видео.";
         return false;
     }
-    const std::streamoff fileSizeSigned = input.tellg();
-    if (fileSizeSigned < 0) {
-        error = L"Не удалось определить размер видео.";
+    const std::streamoff signedSize = input.tellg();
+    if (signedSize <= 0) {
+        error = L"Созданное видео пусто.";
         return false;
     }
-    const std::uint64_t fileSize = static_cast<std::uint64_t>(fileSizeSigned);
+    const std::uint64_t fileSize = static_cast<std::uint64_t>(signedSize);
     input.seekg(0);
 
     const std::string boundary = "----ScanDisplayBoundary7MA4YWxkTrZu0gW";
     const auto field = [&](const char* name, const std::wstring& value) {
-        return std::string("--") + boundary + "\r\nContent-Disposition: form-data; name=\"" + name + "\"\r\n\r\n" +
-            WideToUtf8(value) + "\r\n";
+        return std::string("--") + boundary + "\r\nContent-Disposition: form-data; name=\"" + name +
+            "\"\r\n\r\n" + WideToUtf8(value) + "\r\n";
     };
+
     std::string prefix;
     prefix += field("started_at", startedAt);
     prefix += field("ended_at", endedAt);
@@ -574,6 +630,7 @@ bool UploadVideo(const fs::path& file, const std::wstring& startedAt, const std:
         return false;
     }
     WinHttpSetTimeouts(sessionHandle, g_config.timeoutMs, g_config.timeoutMs, g_config.timeoutMs, g_config.timeoutMs);
+
     HINTERNET connection = WinHttpConnect(sessionHandle, parsed.host.c_str(), parsed.port, 0);
     HINTERNET request = connection ? WinHttpOpenRequest(connection, L"POST", parsed.path.c_str(), nullptr,
         WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, parsed.secure ? WINHTTP_FLAG_SECURE : 0) : nullptr;
@@ -600,6 +657,7 @@ bool UploadVideo(const fs::path& file, const std::wstring& startedAt, const std:
                     break;
                 }
             }
+
             if (!writeOk || !WriteHttpData(request, suffix.data(), static_cast<DWORD>(suffix.size()))) {
                 error = L"Ошибка передачи видео на сервер.";
             } else if (!WinHttpReceiveResponse(request, nullptr)) {
@@ -607,7 +665,8 @@ bool UploadVideo(const fs::path& file, const std::wstring& startedAt, const std:
             } else {
                 DWORD status = 0;
                 DWORD statusSize = sizeof(status);
-                WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, nullptr, &status, &statusSize, nullptr);
+                WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                    nullptr, &status, &statusSize, nullptr);
                 std::string responseBody;
                 for (;;) {
                     DWORD available = 0;
@@ -618,11 +677,14 @@ bool UploadVideo(const fs::path& file, const std::wstring& startedAt, const std:
                     if (!WinHttpReadData(request, responseBody.data() + offset, available, &read)) break;
                     responseBody.resize(offset + read);
                 }
+
                 if (status == 200 && responseBody.find("\"ok\":true") != std::string::npos) {
                     success = true;
                 } else {
                     const std::string message = JsonString(responseBody, "message");
-                    error = message.empty() ? L"Сервер отклонил видео, HTTP " + std::to_wstring(status) : Utf8ToWide(message);
+                    error = message.empty()
+                        ? L"Сервер отклонил видео, HTTP " + std::to_wstring(status)
+                        : Utf8ToWide(message);
                 }
             }
         }
@@ -634,33 +696,43 @@ bool UploadVideo(const fs::path& file, const std::wstring& startedAt, const std:
     return success;
 }
 
-void RemoveFrames(const fs::path& directory) {
-    if (g_config.keepFrames) return;
-    std::error_code ec;
-    for (const auto& entry : fs::directory_iterator(directory, ec)) {
-        if (entry.path().extension() == L".bmp") fs::remove(entry.path(), ec);
-    }
-}
-
 void Notify(const std::wstring& title, const std::wstring& text, DWORD flags = NIIF_INFO) {
     g_tray.uFlags = NIF_INFO;
-    wcsncpy_s(g_tray.szInfoTitle, title.c_str(), _TRUNCATE);
-    wcsncpy_s(g_tray.szInfo, text.c_str(), _TRUNCATE);
+    wcsncpy_s(g_tray.szInfoTitle, _countof(g_tray.szInfoTitle), title.c_str(), _TRUNCATE);
+    wcsncpy_s(g_tray.szInfo, _countof(g_tray.szInfo), text.c_str(), _TRUNCATE);
     g_tray.dwInfoFlags = flags;
     Shell_NotifyIconW(NIM_MODIFY, &g_tray);
     g_tray.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
 }
 
-void FinalizeRecording(fs::path directory, std::wstring startedAt, std::wstring endedAt, StudentSession student) {
-    fs::path video;
-    std::wstring error;
-    bool ok = EncodeVideo(directory, video, error);
-    if (ok) ok = UploadVideo(video, startedAt, endedAt, student, error);
-    if (ok) RemoveFrames(directory);
+void FinalizeRecording(fs::path outputFile, std::wstring startedAt, std::wstring endedAt,
+                       StudentSession student) {
+    if (g_captureThread.joinable()) g_captureThread.join();
+
+    DWORD exitCode = 1;
+    if (g_ffmpegProcess.hProcess) {
+        WaitForSingleObject(g_ffmpegProcess.hProcess, INFINITE);
+        GetExitCodeProcess(g_ffmpegProcess.hProcess, &exitCode);
+        CloseHandle(g_ffmpegProcess.hThread);
+        CloseHandle(g_ffmpegProcess.hProcess);
+        g_ffmpegProcess = {};
+    }
+
+    std::wstring error = GetCaptureError();
+    bool ok = exitCode == 0 && fs::exists(outputFile);
+    if (!ok && error.empty()) {
+        error = L"FFmpeg завершился с кодом " + std::to_wstring(exitCode) + L".";
+    }
+    if (ok) ok = UploadVideo(outputFile, startedAt, endedAt, student, error);
+
+    if (ok && g_config.deleteAfterUpload) {
+        std::error_code ec;
+        fs::remove(outputFile, ec);
+    }
 
     auto* message = new std::wstring(ok
         ? L"Видео успешно создано и отправлено на сервер."
-        : L"Видео сохранено локально, но обработка или отправка завершилась ошибкой: " + error);
+        : L"Видео оставлено локально. Ошибка обработки или отправки: " + error);
     PostMessageW(g_mainWindow, kFinalizeMessage, ok ? 1 : 0, reinterpret_cast<LPARAM>(message));
 }
 
@@ -673,45 +745,75 @@ void StartRecording() {
         student = g_student;
     }
     if (!student.authorized()) {
-        MessageBoxW(g_mainWindow, L"Сначала выполните авторизацию по цифровому коду студента.", L"ScanDisplay", MB_ICONWARNING);
-        return;
-    }
-    if (!fs::exists(g_config.ffmpegPath)) {
-        MessageBoxW(g_mainWindow, (L"Не найден FFmpeg:\n" + g_config.ffmpegPath).c_str(), L"ScanDisplay", MB_ICONERROR);
+        MessageBoxW(g_mainWindow, L"Сначала выполните авторизацию по цифровому коду студента.",
+            L"ScanDisplay", MB_ICONWARNING);
         return;
     }
 
-    const std::wstring folder = LocalTimestamp(L"%04u%02u%02u_%02u%02u%02u");
-    g_sessionDir = g_config.outputDir / student.code / folder;
+    g_screenX = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    g_screenY = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    g_screenWidth = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    g_screenHeight = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    if (g_screenWidth <= 0 || g_screenHeight <= 0) {
+        MessageBoxW(g_mainWindow, L"Не удалось определить размер экрана.", L"ScanDisplay", MB_ICONERROR);
+        return;
+    }
+
+    const fs::path directory = g_config.outputDir / student.code / TimestampFolder();
     std::error_code ec;
-    fs::create_directories(g_sessionDir, ec);
+    fs::create_directories(directory, ec);
     if (ec) {
         MessageBoxW(g_mainWindow, L"Не удалось создать каталог записи.", L"ScanDisplay", MB_ICONERROR);
         return;
     }
+    g_outputFile = directory / L"recording.mp4";
 
-    g_startedAt = LocalTimestamp(L"%04u-%02u-%02u %02u:%02u:%02u");
+    std::wstring error;
+    if (!StartFfmpeg(g_outputFile, error)) {
+        MessageBoxW(g_mainWindow, error.c_str(), L"ScanDisplay", MB_ICONERROR);
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_captureErrorMutex);
+        g_captureError.clear();
+    }
+    g_startedAt = TimestampIso();
+    g_recordingStudent = student;
     g_stopCapture.store(false);
     g_state.store(AppState::Recording);
-    g_captureThread = std::thread(CaptureLoop, g_sessionDir, student);
+
+    try {
+        g_captureThread = std::thread(CaptureLoop, student);
+    } catch (...) {
+        g_stopCapture.store(true);
+        if (g_ffmpegInput != INVALID_HANDLE_VALUE) {
+            CloseHandle(g_ffmpegInput);
+            g_ffmpegInput = INVALID_HANDLE_VALUE;
+        }
+        WaitForSingleObject(g_ffmpegProcess.hProcess, INFINITE);
+        CloseHandle(g_ffmpegProcess.hThread);
+        CloseHandle(g_ffmpegProcess.hProcess);
+        g_ffmpegProcess = {};
+        g_state.store(AppState::Idle);
+        MessageBoxW(g_mainWindow, L"Не удалось запустить поток записи.", L"ScanDisplay", MB_ICONERROR);
+        return;
+    }
+
     Notify(L"ScanDisplay", L"Запись экрана начата.");
 }
 
 void StopRecording() {
-    if (g_state.load() != AppState::Recording) return;
-    g_state.store(AppState::Finalizing);
-    g_stopCapture.store(true);
-    if (g_captureThread.joinable()) g_captureThread.join();
+    AppState expected = AppState::Recording;
+    if (!g_state.compare_exchange_strong(expected, AppState::Finalizing)) return;
 
-    const std::wstring endedAt = LocalTimestamp(L"%04u-%02u-%02u %02u:%02u:%02u");
-    StudentSession student;
-    {
-        std::lock_guard<std::mutex> lock(g_studentMutex);
-        student = g_student;
-    }
+    g_stopCapture.store(true);
+    g_captureWake.notify_all();
+    const std::wstring endedAt = TimestampIso();
+
     if (g_finalizeThread.joinable()) g_finalizeThread.join();
-    g_finalizeThread = std::thread(FinalizeRecording, g_sessionDir, g_startedAt, endedAt, student);
-    Notify(L"ScanDisplay", L"Запись остановлена. Создаётся MP4 и выполняется отправка.");
+    g_finalizeThread = std::thread(FinalizeRecording, g_outputFile, g_startedAt, endedAt, g_recordingStudent);
+    Notify(L"ScanDisplay", L"Запись остановлена. MP4 завершается и отправляется на сервер.");
 }
 
 void ShowTrayMenu(HWND window) {
@@ -724,63 +826,78 @@ void ShowTrayMenu(HWND window) {
         std::lock_guard<std::mutex> lock(g_studentMutex);
         student = g_student;
     }
-    const std::wstring authCaption = student.authorized() ? L"Авторизация: " + student.fullName() : L"Авторизация";
-    AppendMenuW(menu, MF_STRING, kMenuAuth, authCaption.c_str());
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-
     const AppState state = g_state.load();
-    AppendMenuW(menu, MF_STRING | (state == AppState::Idle ? MF_ENABLED : MF_GRAYED), kMenuStart, L"Начать запись");
-    AppendMenuW(menu, MF_STRING | (state == AppState::Recording ? MF_ENABLED : MF_GRAYED), kMenuStop, L"Остановить запись");
+    const std::wstring authCaption = student.authorized()
+        ? L"Авторизация: " + student.fullName()
+        : L"Авторизация";
+
+    AppendMenuW(menu, MF_STRING | (state == AppState::Idle ? MF_ENABLED : MF_GRAYED),
+        kMenuAuth, authCaption.c_str());
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING | (state == AppState::Idle ? MF_ENABLED : MF_GRAYED), kMenuExit, L"Выход");
+    AppendMenuW(menu, MF_STRING | (state == AppState::Idle ? MF_ENABLED : MF_GRAYED),
+        kMenuStart, L"Начать запись");
+    AppendMenuW(menu, MF_STRING | (state == AppState::Recording ? MF_ENABLED : MF_GRAYED),
+        kMenuStop, L"Остановить запись");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING | (state == AppState::Idle ? MF_ENABLED : MF_GRAYED),
+        kMenuExit, L"Выход");
 
     SetForegroundWindow(window);
-    TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_LEFTALIGN, point.x, point.y, 0, window, nullptr);
+    TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_LEFTALIGN,
+        point.x, point.y, 0, window, nullptr);
     DestroyMenu(menu);
 }
 
 void OpenAuthWindow() {
+    if (g_state.load() != AppState::Idle) return;
     if (g_authWindow && IsWindow(g_authWindow)) {
         ShowWindow(g_authWindow, SW_RESTORE);
         SetForegroundWindow(g_authWindow);
         return;
     }
-    g_authWindow = CreateWindowExW(WS_EX_DLGMODALFRAME, kAuthWindowClass, L"Авторизация ScanDisplay",
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT, 440, 230,
-        g_mainWindow, nullptr, g_instance, nullptr);
+
+    g_authWindow = CreateWindowExW(WS_EX_DLGMODALFRAME, kAuthWindowClass,
+        L"Авторизация ScanDisplay", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+        CW_USEDEFAULT, CW_USEDEFAULT, 440, 230, g_mainWindow, nullptr, g_instance, nullptr);
     ShowWindow(g_authWindow, SW_SHOW);
     UpdateWindow(g_authWindow);
 }
 
 LRESULT CALLBACK AuthWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
-        case WM_CREATE: {
+        case WM_CREATE:
             CreateWindowW(L"STATIC", L"Введите цифровой код студента:", WS_CHILD | WS_VISIBLE,
                 24, 22, 370, 22, window, nullptr, g_instance, nullptr);
-            g_authEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+            g_authEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                 24, 52, 370, 30, window, reinterpret_cast<HMENU>(kAuthEditId), g_instance, nullptr);
-            CreateWindowW(L"BUTTON", L"Авторизоваться", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+            CreateWindowW(L"BUTTON", L"Авторизоваться",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
                 24, 96, 180, 34, window, reinterpret_cast<HMENU>(kAuthButtonId), g_instance, nullptr);
             g_authStatus = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE,
                 24, 142, 370, 42, window, nullptr, g_instance, nullptr);
             SendMessageW(g_authEdit, EM_SETLIMITTEXT, 32, 0);
             SetFocus(g_authEdit);
             return 0;
-        }
+
         case WM_COMMAND:
             if (LOWORD(wParam) == kAuthButtonId) {
                 wchar_t code[64]{};
-                GetWindowTextW(g_authEdit, code, static_cast<int>(std::size(code)));
+                GetWindowTextW(g_authEdit, code, _countof(code));
                 if (wcslen(code) < 4) {
                     SetWindowTextW(g_authStatus, L"Введите выданный студенту цифровой код.");
                     return 0;
                 }
+
                 EnableWindow(GetDlgItem(window, kAuthButtonId), FALSE);
                 SetWindowTextW(g_authStatus, L"Проверка кода на сервере...");
                 std::wstring error;
                 if (Authenticate(code, error)) {
                     StudentSession student;
-                    { std::lock_guard<std::mutex> lock(g_studentMutex); student = g_student; }
+                    {
+                        std::lock_guard<std::mutex> lock(g_studentMutex);
+                        student = g_student;
+                    }
                     Notify(L"Авторизация выполнена", student.groupName + L": " + student.fullName());
                     DestroyWindow(window);
                 } else {
@@ -790,9 +907,11 @@ LRESULT CALLBACK AuthWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM
                 return 0;
             }
             break;
+
         case WM_CLOSE:
             DestroyWindow(window);
             return 0;
+
         case WM_DESTROY:
             g_authWindow = nullptr;
             g_authEdit = nullptr;
@@ -809,29 +928,37 @@ LRESULT CALLBACK MainWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM
                 case kMenuAuth: OpenAuthWindow(); return 0;
                 case kMenuStart: StartRecording(); return 0;
                 case kMenuStop: StopRecording(); return 0;
-                case kMenuExit: DestroyWindow(window); return 0;
+                case kMenuExit:
+                    if (g_state.load() == AppState::Idle) DestroyWindow(window);
+                    return 0;
             }
             break;
-        case kTrayMessage:
-            if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU || lParam == WM_LBUTTONDBLCLK) {
+
+        case kTrayMessage: {
+            const UINT event = LOWORD(lParam);
+            if (event == WM_RBUTTONUP || event == WM_CONTEXTMENU || event == WM_LBUTTONDBLCLK) {
                 ShowTrayMenu(window);
                 return 0;
             }
             break;
+        }
+
+        case kCaptureFailedMessage:
+            if (g_state.load() == AppState::Recording) StopRecording();
+            return 0;
+
         case kFinalizeMessage: {
             const bool ok = wParam != 0;
             auto* text = reinterpret_cast<std::wstring*>(lParam);
             if (g_finalizeThread.joinable()) g_finalizeThread.join();
             g_state.store(AppState::Idle);
-            Notify(ok ? L"Запись отправлена" : L"Ошибка записи", text ? *text : L"Неизвестный результат.", ok ? NIIF_INFO : NIIF_ERROR);
+            Notify(ok ? L"Запись отправлена" : L"Ошибка записи",
+                text ? *text : L"Неизвестный результат.", ok ? NIIF_INFO : NIIF_ERROR);
             delete text;
             return 0;
         }
+
         case WM_DESTROY:
-            if (g_state.load() != AppState::Idle) {
-                MessageBoxW(window, L"Сначала завершите запись и дождитесь отправки видео.", L"ScanDisplay", MB_ICONWARNING);
-                return 0;
-            }
             Shell_NotifyIconW(NIM_DELETE, &g_tray);
             PostQuitMessage(0);
             return 0;
@@ -861,13 +988,9 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
     g_instance = instance;
     InitCommonControls();
 
-    Gdiplus::GdiplusStartupInput gdiplusInput;
-    if (Gdiplus::GdiplusStartup(&g_gdiplusToken, &gdiplusInput, nullptr) != Gdiplus::Ok) return 1;
-
     std::wstring configError;
     if (!LoadConfig(configError)) {
         MessageBoxW(nullptr, configError.c_str(), L"ScanDisplay", MB_ICONERROR);
-        Gdiplus::GdiplusShutdown(g_gdiplusToken);
         return 1;
     }
     LoadSession();
@@ -876,13 +999,11 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
     if (!singleton || GetLastError() == ERROR_ALREADY_EXISTS) {
         MessageBoxW(nullptr, L"ScanDisplay уже запущен.", L"ScanDisplay", MB_ICONINFORMATION);
         if (singleton) CloseHandle(singleton);
-        Gdiplus::GdiplusShutdown(g_gdiplusToken);
         return 0;
     }
 
     if (!RegisterWindows()) {
         CloseHandle(singleton);
-        Gdiplus::GdiplusShutdown(g_gdiplusToken);
         return 1;
     }
 
@@ -890,7 +1011,6 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
         0, 0, 0, 0, HWND_MESSAGE, nullptr, instance, nullptr);
     if (!g_mainWindow) {
         CloseHandle(singleton);
-        Gdiplus::GdiplusShutdown(g_gdiplusToken);
         return 1;
     }
 
@@ -900,7 +1020,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
     g_tray.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     g_tray.uCallbackMessage = kTrayMessage;
     g_tray.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-    wcscpy_s(g_tray.szTip, L"ScanDisplay — запись экрана");
+    wcscpy_s(g_tray.szTip, _countof(g_tray.szTip), L"ScanDisplay — запись экрана");
     Shell_NotifyIconW(NIM_ADD, &g_tray);
     g_tray.uVersion = NOTIFYICON_VERSION_4;
     Shell_NotifyIconW(NIM_SETVERSION, &g_tray);
@@ -911,12 +1031,13 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
         DispatchMessageW(&message);
     }
 
-    if (g_captureThread.joinable()) {
-        g_stopCapture.store(true);
-        g_captureThread.join();
-    }
+    g_stopCapture.store(true);
+    g_captureWake.notify_all();
+    if (g_captureThread.joinable()) g_captureThread.join();
     if (g_finalizeThread.joinable()) g_finalizeThread.join();
+    if (g_ffmpegInput != INVALID_HANDLE_VALUE) CloseHandle(g_ffmpegInput);
+    if (g_ffmpegProcess.hThread) CloseHandle(g_ffmpegProcess.hThread);
+    if (g_ffmpegProcess.hProcess) CloseHandle(g_ffmpegProcess.hProcess);
     CloseHandle(singleton);
-    Gdiplus::GdiplusShutdown(g_gdiplusToken);
     return static_cast<int>(message.wParam);
 }
