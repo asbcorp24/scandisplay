@@ -1,0 +1,1 @@
+Apply configurable screen capture interval.
