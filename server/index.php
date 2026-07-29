@@ -267,7 +267,7 @@ if ($page === 'dashboard') {
 <nav class="navbar navbar-expand-lg bg-dark navbar-dark shadow-sm">
     <div class="container-fluid px-lg-4">
         <a class="navbar-brand" href="index.php">ScanDisplay</a>
-        <button class="navbar-toggler" data-bs-toggle="collapse" data-bs-target="#nav"><span class="navbar-toggler-icon"></span></button>
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#nav"><span class="navbar-toggler-icon"></span></button>
         <div class="collapse navbar-collapse" id="nav">
             <ul class="navbar-nav me-auto">
                 <li class="nav-item"><a class="nav-link <?= $page === 'dashboard' ? 'active' : '' ?>" href="index.php">Главная</a></li>
@@ -397,30 +397,42 @@ if ($page === 'dashboard') {
                 <thead><tr><th>Группа</th><th>Фамилия</th><th>Имя</th><th>Код</th><th>Статус</th><th>Записей</th><th>Действия</th></tr></thead>
                 <tbody>
                 <?php foreach ($students as $student): ?>
+                    <?php $formId = 'student-' . (int) $student['id']; ?>
                     <tr>
-                        <form method="post">
-                            <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
-                            <input type="hidden" name="action" value="update_student">
-                            <input type="hidden" name="redirect_page" value="students">
-                            <input type="hidden" name="id" value="<?= (int) $student['id'] ?>">
-                            <td><select class="form-select form-select-sm" name="group_id"><?php foreach ($groupOptions as $group): ?><option value="<?= (int) $group['id'] ?>" <?= (int) $group['id'] === (int) $student['group_id'] ? 'selected' : '' ?>><?= h($group['name']) ?></option><?php endforeach; ?></select></td>
-                            <td><input class="form-control form-control-sm" name="last_name" value="<?= h($student['last_name']) ?>" required></td>
-                            <td><input class="form-control form-control-sm" name="first_name" value="<?= h($student['first_name']) ?>" required></td>
-                            <td><span class="code"><?= h($student['code']) ?></span></td>
-                            <td><select class="form-select form-select-sm" name="active"><option value="1" <?= (int) $student['active'] === 1 ? 'selected' : '' ?>>Активен</option><option value="0" <?= (int) $student['active'] === 0 ? 'selected' : '' ?>>Отключён</option></select></td>
-                            <td><a href="?page=recordings&student_id=<?= (int) $student['id'] ?>"><?= (int) $student['recording_count'] ?></a></td>
-                            <td><button class="btn btn-sm btn-outline-primary">Сохранить</button></td>
-                        </form>
-                    </tr>
-                    <tr class="table-light">
-                        <td colspan="7" class="py-2">
-                            <form method="post" class="d-inline" onsubmit="return confirm('Создать новый код? Старые авторизации перестанут работать.')">
+                        <td>
+                            <form id="<?= h($formId) ?>" method="post">
                                 <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
-                                <input type="hidden" name="action" value="regenerate_code">
+                                <input type="hidden" name="action" value="update_student">
                                 <input type="hidden" name="redirect_page" value="students">
                                 <input type="hidden" name="id" value="<?= (int) $student['id'] ?>">
-                                <button class="btn btn-sm btn-outline-warning">Сгенерировать новый код</button>
                             </form>
+                            <select class="form-select form-select-sm" name="group_id" form="<?= h($formId) ?>">
+                                <?php foreach ($groupOptions as $group): ?>
+                                    <option value="<?= (int) $group['id'] ?>" <?= (int) $group['id'] === (int) $student['group_id'] ? 'selected' : '' ?>><?= h($group['name']) ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </td>
+                        <td><input class="form-control form-control-sm" name="last_name" form="<?= h($formId) ?>" value="<?= h($student['last_name']) ?>" required></td>
+                        <td><input class="form-control form-control-sm" name="first_name" form="<?= h($formId) ?>" value="<?= h($student['first_name']) ?>" required></td>
+                        <td><span class="code"><?= h($student['code']) ?></span></td>
+                        <td>
+                            <select class="form-select form-select-sm" name="active" form="<?= h($formId) ?>">
+                                <option value="1" <?= (int) $student['active'] === 1 ? 'selected' : '' ?>>Активен</option>
+                                <option value="0" <?= (int) $student['active'] === 0 ? 'selected' : '' ?>>Отключён</option>
+                            </select>
+                        </td>
+                        <td><a href="?page=recordings&student_id=<?= (int) $student['id'] ?>"><?= (int) $student['recording_count'] ?></a></td>
+                        <td>
+                            <div class="d-flex flex-wrap gap-2">
+                                <button class="btn btn-sm btn-outline-primary" type="submit" form="<?= h($formId) ?>">Сохранить</button>
+                                <form method="post" class="d-inline" onsubmit="return confirm('Создать новый код? Старые авторизации перестанут работать.')">
+                                    <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
+                                    <input type="hidden" name="action" value="regenerate_code">
+                                    <input type="hidden" name="redirect_page" value="students">
+                                    <input type="hidden" name="id" value="<?= (int) $student['id'] ?>">
+                                    <button class="btn btn-sm btn-outline-warning">Новый код</button>
+                                </form>
+                            </div>
                         </td>
                     </tr>
                 <?php endforeach; ?>
