@@ -1,0 +1,101 @@
+name: One-time source corrections
+
+on:
+  push:
+    branches:
+      - feature/initial-mvp
+    paths:
+      - .github/workflows/source-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/initial-mvp
+          fetch-depth: 0
+
+      - name: Apply corrections
+        shell: python
+        run: |
+          from pathlib import Path
+
+          main = Path('client/src/main.cpp')
+          source = main.read_text(encoding='utf-8')
+          old = 'std::vector<wchar_t> mutableCommand(command.str().begin(), command.str().end());'
+          new = 'const std::wstring commandLine = command.str();\n    std::vector<wchar_t> mutableCommand(commandLine.begin(), commandLine.end());'
+          if old not in source:
+              raise SystemExit('FFmpeg command line marker not found')
+          source = source.replace(old, new, 1)
+          source = source.replace(
+              'reinterpret_cast<HMENU>(kAuthEditId)',
+              'reinterpret_cast<HMENU>(static_cast<INT_PTR>(kAuthEditId))'
+          )
+          source = source.replace(
+              'reinterpret_cast<HMENU>(kAuthButtonId)',
+              'reinterpret_cast<HMENU>(static_cast<INT_PTR>(kAuthButtonId))'
+          )
+          main.write_text(source, encoding='utf-8')
+
+          index = Path('server/index.php')
+          html = index.read_text(encoding='utf-8')
+          start_marker = '                <?php foreach ($students as $student): ?>\n'
+          end_marker = '                <?php if (!$students): ?>'
+          start = html.index(start_marker)
+          end = html.index(end_marker, start)
+          replacement = '''                <?php foreach ($students as $student): ?>
+                    <?php $formId = 'student-' . (int) $student['id']; ?>
+                    <tr>
+                        <td>
+                            <form id="<?= h($formId) ?>" method="post">
+                                <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
+                                <input type="hidden" name="action" value="update_student">
+                                <input type="hidden" name="redirect_page" value="students">
+                                <input type="hidden" name="id" value="<?= (int) $student['id'] ?>">
+                            </form>
+                            <select class="form-select form-select-sm" name="group_id" form="<?= h($formId) ?>">
+                                <?php foreach ($groupOptions as $group): ?>
+                                    <option value="<?= (int) $group['id'] ?>" <?= (int) $group['id'] === (int) $student['group_id'] ? 'selected' : '' ?>><?= h($group['name']) ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </td>
+                        <td><input class="form-control form-control-sm" name="last_name" form="<?= h($formId) ?>" value="<?= h($student['last_name']) ?>" required></td>
+                        <td><input class="form-control form-control-sm" name="first_name" form="<?= h($formId) ?>" value="<?= h($student['first_name']) ?>" required></td>
+                        <td><span class="code"><?= h($student['code']) ?></span></td>
+                        <td>
+                            <select class="form-select form-select-sm" name="active" form="<?= h($formId) ?>">
+                                <option value="1" <?= (int) $student['active'] === 1 ? 'selected' : '' ?>>Активен</option>
+                                <option value="0" <?= (int) $student['active'] === 0 ? 'selected' : '' ?>>Отключён</option>
+                            </select>
+                        </td>
+                        <td><a href="?page=recordings&student_id=<?= (int) $student['id'] ?>"><?= (int) $student['recording_count'] ?></a></td>
+                        <td>
+                            <div class="d-flex flex-wrap gap-2">
+                                <button class="btn btn-sm btn-outline-primary" type="submit" form="<?= h($formId) ?>">Сохранить</button>
+                                <form method="post" class="d-inline" onsubmit="return confirm('Создать новый код? Старые авторизации перестанут работать.')">
+                                    <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
+                                    <input type="hidden" name="action" value="regenerate_code">
+                                    <input type="hidden" name="redirect_page" value="students">
+                                    <input type="hidden" name="id" value="<?= (int) $student['id'] ?>">
+                                    <button class="btn btn-sm btn-outline-warning">Новый код</button>
+                                </form>
+                            </div>
+                        </td>
+                    </tr>
+                <?php endforeach; ?>
+'''
+          index.write_text(html[:start] + replacement + html[end:], encoding='utf-8')
+
+      - name: Commit corrections
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add client/src/main.cpp server/index.php
+          git commit -m "Fix FFmpeg command construction and student edit forms"
+          git push origin HEAD:feature/initial-mvp
