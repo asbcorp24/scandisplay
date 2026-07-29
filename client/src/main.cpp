@@ -50,6 +50,7 @@ struct Config {
     std::wstring ffmpegPath;
     fs::path outputDir;
     bool deleteAfterUpload = false;
+    int captureIntervalSeconds = 30;
     DWORD timeoutMs = 120000;
 };
 
@@ -120,6 +121,13 @@ bool LoadConfig(std::wstring& error) {
     g_config.ffmpegPath = ExpandEnvironment(ReadIni(configPath, L"recording", L"ffmpeg_path", L"ffmpeg.exe"));
     g_config.outputDir = ExpandEnvironment(ReadIni(configPath, L"recording", L"output_dir", L"%LOCALAPPDATA%\\ScanDisplay\\recordings"));
     g_config.deleteAfterUpload = ReadIni(configPath, L"recording", L"delete_after_upload", L"0") == L"1";
+
+    try {
+        const int interval = std::stoi(ReadIni(configPath, L"recording", L"capture_interval_seconds", L"30"));
+        g_config.captureIntervalSeconds = interval < 1 ? 1 : interval;
+    } catch (...) {
+        g_config.captureIntervalSeconds = 30;
+    }
 
     try {
         const int seconds = std::stoi(ReadIni(configPath, L"client", L"request_timeout_seconds", L"120"));
@@ -455,7 +463,8 @@ bool StartFfmpeg(const fs::path& outputFile, std::wstring& error) {
     std::wstringstream command;
     command << L'"' << g_config.ffmpegPath << L"\" -y -hide_banner -loglevel error "
             << L"-f rawvideo -pix_fmt bgr0 -video_size " << g_screenWidth << L"x" << g_screenHeight << L" "
-            << L"-framerate 1 -i pipe:0 -an -vf fps=25 -c:v libx264 -preset veryfast -crf 23 "
+            << L"-framerate 1/" << g_config.captureIntervalSeconds
+            << L" -i pipe:0 -an -vf fps=25 -c:v libx264 -preset veryfast -crf 23 "
             << L"-pix_fmt yuv420p -movflags +faststart \"" << outputFile.wstring() << L"\"";
     const std::wstring commandLine = command.str();
     std::vector<wchar_t> mutableCommand(commandLine.begin(), commandLine.end());
@@ -554,7 +563,7 @@ void CaptureLoop(StudentSession student) {
             break;
         }
 
-        nextFrame += std::chrono::seconds(1);
+        nextFrame += std::chrono::seconds(g_config.captureIntervalSeconds);
         std::unique_lock<std::mutex> waitLock(g_captureWakeMutex);
         g_captureWake.wait_until(waitLock, nextFrame, [] { return g_stopCapture.load(); });
     }
@@ -801,7 +810,8 @@ void StartRecording() {
         return;
     }
 
-    Notify(L"ScanDisplay", L"Запись экрана начата.");
+    Notify(L"ScanDisplay", L"Запись экрана начата. Интервал кадров: " +
+        std::to_wstring(g_config.captureIntervalSeconds) + L" сек.");
 }
 
 void StopRecording() {
