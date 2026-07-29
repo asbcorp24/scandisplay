@@ -1,0 +1,120 @@
+name: Minimize ScanDisplay video size
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/minimize-video-trigger.txt
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Optimize FFmpeg encoding and documentation
+        shell: python
+        run: |
+          from pathlib import Path
+
+          main = Path('client/src/main.cpp')
+          source = main.read_text(encoding='utf-8')
+
+          replacements = [
+              (
+                  '    bool deleteAfterUpload = false;\n    int captureIntervalSeconds = 30;\n    DWORD timeoutMs = 120000;',
+                  '    bool deleteAfterUpload = false;\n    int captureIntervalSeconds = 30;\n    int videoCrf = 35;\n    std::wstring videoPreset = L"veryslow";\n    DWORD timeoutMs = 120000;'
+              ),
+              (
+                  '    try {\n        const int seconds = std::stoi(ReadIni(configPath, L"client", L"request_timeout_seconds", L"120"));',
+                  '    try {\n        const int crf = std::stoi(ReadIni(configPath, L"recording", L"video_crf", L"35"));\n        g_config.videoCrf = max(18, min(45, crf));\n    } catch (...) {\n        g_config.videoCrf = 35;\n    }\n\n    g_config.videoPreset = ReadIni(configPath, L"recording", L"video_preset", L"veryslow");\n    if (g_config.videoPreset != L"medium" && g_config.videoPreset != L"slow" &&\n        g_config.videoPreset != L"slower" && g_config.videoPreset != L"veryslow") {\n        g_config.videoPreset = L"veryslow";\n    }\n\n    try {\n        const int seconds = std::stoi(ReadIni(configPath, L"client", L"request_timeout_seconds", L"120"));'
+              ),
+              (
+                  '            << L"-framerate 1/" << g_config.captureIntervalSeconds\n            << L" -i pipe:0 -an -vf fps=25 -c:v libx264 -preset veryfast -crf 23 "\n            << L"-pix_fmt yuv420p -movflags +faststart \\\"" << outputFile.wstring() << L"\\\"";',
+                  '            << L"-framerate 1/" << g_config.captureIntervalSeconds\n            << L" -i pipe:0 -an -fps_mode passthrough -c:v libx264 -preset "\n            << g_config.videoPreset << L" -crf " << g_config.videoCrf << L" "\n            << L"-pix_fmt yuv420p -movflags +faststart \\\"" << outputFile.wstring() << L"\\\"";'
+              ),
+          ]
+
+          for old, new in replacements:
+              if old not in source:
+                  raise SystemExit(f'Expected main.cpp fragment not found: {old[:160]!r}')
+              source = source.replace(old, new, 1)
+
+          main.write_text(source, encoding='utf-8')
+
+          config = Path('client/config.example.ini')
+          config_text = config.read_text(encoding='utf-8')
+          old_config = 'capture_interval_seconds=30\ndelete_after_upload=0'
+          new_config = ('capture_interval_seconds=30\n'
+                        'video_crf=35\n'
+                        'video_preset=veryslow\n'
+                        'delete_after_upload=0')
+          if old_config not in config_text:
+              raise SystemExit('Expected config.example.ini fragment not found')
+          config.write_text(config_text.replace(old_config, new_config, 1), encoding='utf-8')
+
+          readme = Path('README.md')
+          text = readme.read_text(encoding='utf-8')
+
+          def replace_once(old: str, new: str) -> None:
+              global text
+              if old not in text:
+                  raise SystemExit(f'Expected README fragment not found: {old[:160]!r}')
+              text = text.replace(old, new, 1)
+
+          replace_once(
+              'capture_interval_seconds=30\n'
+              'delete_after_upload=0',
+              'capture_interval_seconds=30\n'
+              'video_crf=35\n'
+              'video_preset=veryslow\n'
+              'delete_after_upload=0'
+          )
+
+          replace_once(
+              '- после изменения параметра программу необходимо перезапустить.\n\n'
+              '`delete_after_upload`:',
+              '- после изменения параметра программу необходимо перезапустить.\n\n'
+              '`video_crf` — степень сжатия H.264. Чем больше значение, тем меньше файл и ниже качество:\n\n'
+              '```ini\n'
+              'video_crf=35\n'
+              '```\n\n'
+              '- допустимый диапазон — от `18` до `45`;\n'
+              '- значение по умолчанию `35` настроено на минимальный размер при сохранении читаемости экрана;\n'
+              '- для более чёткого текста можно установить `30` или `32`;\n'
+              '- значения за пределами диапазона автоматически ограничиваются.\n\n'
+              '`video_preset` — тщательность сжатия:\n\n'
+              '```ini\n'
+              'video_preset=veryslow\n'
+              '```\n\n'
+              '- `veryslow` создаёт наиболее компактный файл, но сильнее нагружает процессор;\n'
+              '- также разрешены `slower`, `slow` и `medium`;\n'
+              '- при интервале 30 секунд рекомендуется оставить `veryslow`.\n\n'
+              '`delete_after_upload`:'
+          )
+
+          replace_once(
+              'Для совместимости с браузерными проигрывателями FFmpeg создаёт стандартный видеопоток 25 кадров/с и повторяет последний снимок до появления следующего. Временная шкала MP4 учитывает выбранный интервал, поэтому длительность видео соответствует реальной длительности записи.',
+              'FFmpeg сохраняет только фактически снятые кадры и не создаёт искусственные 25 кадров/с. Временные метки каждого кадра сохраняются в MP4, поэтому длительность видео соответствует реальной длительности записи. Кодирование H.264 выполняется с высоким сжатием, без звука и без лишних дублированных кадров.'
+          )
+
+          readme.write_text(text, encoding='utf-8')
+
+          Path('.github/minimize-video-trigger.txt').unlink()
+          Path('.github/workflows/minimize-video.yml').unlink()
+
+      - name: Commit optimized encoding
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Minimize recorded video size"
+          git push origin main
