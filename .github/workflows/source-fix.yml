@@ -1,11 +1,7 @@
 name: One-time source corrections
 
 on:
-  push:
-    branches:
-      - feature/initial-mvp
-    paths:
-      - .github/workflows/source-fix.yml
+  pull_request:
 
 permissions:
   contents: write
