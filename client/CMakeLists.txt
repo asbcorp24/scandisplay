@@ -21,7 +21,6 @@ if(MSVC)
 endif()
 
 target_link_libraries(ScanDisplay PRIVATE
-    gdiplus
     winhttp
     shell32
     comctl32
