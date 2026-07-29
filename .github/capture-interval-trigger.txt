@@ -1,1 +1,0 @@
-Finalize configurable screen capture interval documentation.
