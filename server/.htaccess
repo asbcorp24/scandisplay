@@ -1,5 +1,8 @@
 Options -Indexes
 
+# Передаёт Bearer-токен в PHP при некоторых конфигурациях Apache/FastCGI.
+SetEnvIf Authorization "(.+)" HTTP_AUTHORIZATION=$1
+
 <FilesMatch "^(config|bootstrap)\.php$">
     Require all denied
 </FilesMatch>
