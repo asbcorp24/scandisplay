@@ -1,0 +1,22 @@
+# CMake / client build
+client/build/
+client/out/
+*.obj
+*.pdb
+*.ilk
+*.exe
+
+# Client runtime
+client/config.ini
+recordings/
+
+# Server runtime
+server/storage/database.sqlite
+server/storage/videos/
+!server/storage/videos/.gitkeep
+server/.env
+
+# IDE
+.vs/
+.vscode/
+.idea/
