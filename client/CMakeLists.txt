@@ -9,6 +9,10 @@ add_executable(ScanDisplay WIN32
     src/main.cpp
 )
 
+target_precompile_headers(ScanDisplay PRIVATE
+    src/compat.hpp
+)
+
 target_compile_definitions(ScanDisplay PRIVATE
     UNICODE
     _UNICODE
