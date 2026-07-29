@@ -1,0 +1,106 @@
+name: Apply capture interval configuration
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/capture-interval-trigger.txt
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Update client and documentation
+        shell: python
+        run: |
+          from pathlib import Path
+
+          main = Path('client/src/main.cpp')
+          source = main.read_text(encoding='utf-8')
+
+          replacements = [
+              (
+                  '    bool deleteAfterUpload = false;\n    DWORD timeoutMs = 120000;',
+                  '    bool deleteAfterUpload = false;\n    int captureIntervalSeconds = 30;\n    DWORD timeoutMs = 120000;'
+              ),
+              (
+                  '    g_config.deleteAfterUpload = ReadIni(configPath, L"recording", L"delete_after_upload", L"0") == L"1";\n\n    try {\n        const int seconds = std::stoi(ReadIni(configPath, L"client", L"request_timeout_seconds", L"120"));',
+                  '    g_config.deleteAfterUpload = ReadIni(configPath, L"recording", L"delete_after_upload", L"0") == L"1";\n\n    try {\n        const int interval = std::stoi(ReadIni(configPath, L"recording", L"capture_interval_seconds", L"30"));\n        g_config.captureIntervalSeconds = interval < 1 ? 1 : interval;\n    } catch (...) {\n        g_config.captureIntervalSeconds = 30;\n    }\n\n    try {\n        const int seconds = std::stoi(ReadIni(configPath, L"client", L"request_timeout_seconds", L"120"));'
+              ),
+              (
+                  '            << L"-framerate 1 -i pipe:0 -an -vf fps=25 -c:v libx264 -preset veryfast -crf 23 "',
+                  '            << L"-framerate 1/" << g_config.captureIntervalSeconds\n            << L" -i pipe:0 -an -vf fps=25 -c:v libx264 -preset veryfast -crf 23 "'
+              ),
+              (
+                  '        nextFrame += std::chrono::seconds(1);',
+                  '        nextFrame += std::chrono::seconds(g_config.captureIntervalSeconds);'
+              ),
+              (
+                  '    Notify(L"ScanDisplay", L"Запись экрана начата.");',
+                  '    Notify(L"ScanDisplay", L"Запись экрана начата. Интервал кадров: " +\n        std::to_wstring(g_config.captureIntervalSeconds) + L" сек.");'
+              ),
+          ]
+
+          for old, new in replacements:
+              if old not in source:
+                  raise SystemExit(f'Expected main.cpp fragment not found: {old[:100]!r}')
+              source = source.replace(old, new, 1)
+
+          main.write_text(source, encoding='utf-8')
+
+          config = Path('client/config.example.ini')
+          config_text = config.read_text(encoding='utf-8')
+          old_config = 'output_dir=%LOCALAPPDATA%\\ScanDisplay\\recordings\ndelete_after_upload=0'
+          new_config = ('output_dir=%LOCALAPPDATA%\\ScanDisplay\\recordings\n'
+                        'capture_interval_seconds=30\n'
+                        'delete_after_upload=0')
+          if old_config not in config_text:
+              raise SystemExit('Expected config.example.ini fragment not found')
+          config.write_text(config_text.replace(old_config, new_config, 1), encoding='utf-8')
+
+          readme = Path('README.md')
+          text = readme.read_text(encoding='utf-8')
+          readme_replacements = [
+              (
+                  'делает снимок всего экрана раз в секунду, добавляет в кадр группу',
+                  'делает снимок всего экрана с настраиваемым интервалом (по умолчанию раз в 30 секунд), добавляет в кадр группу'
+              ),
+              (
+                  'output_dir=%LOCALAPPDATA%\\ScanDisplay\\recordings\ndelete_after_upload=0',
+                  'output_dir=%LOCALAPPDATA%\\ScanDisplay\\recordings\ncapture_interval_seconds=30\ndelete_after_upload=0'
+              ),
+              (
+                  'Параметр `delete_after_upload`:',
+                  'Параметр `capture_interval_seconds` задаёт интервал между кадрами в секундах. По умолчанию используется `30`. Минимальное значение — `1`; значения меньше `1` автоматически заменяются на `1`. После изменения перезапустите программу.\n\nПараметр `delete_after_upload`:'
+              ),
+              (
+                  'Программа один раз в секунду получает кадр всего виртуального рабочего стола.',
+                  'Программа получает кадр всего виртуального рабочего стола через интервал `capture_interval_seconds` из `config.ini`.'
+              ),
+              (
+                  'Клиент получает один новый кадр в секунду. Для совместимости с браузерными проигрывателями FFmpeg формирует стандартный видеопоток 25 кадров/с, повторяя кадр до появления следующего снимка. Это не повышает частоту наблюдения: фактическая частота захвата остаётся 1 кадр/с.',
+                  'Клиент получает новый кадр через интервал `capture_interval_seconds`. По умолчанию это один кадр в 30 секунд, минимально допустимый интервал — одна секунда. Для совместимости с браузерными проигрывателями FFmpeg формирует стандартный видеопоток 25 кадров/с и повторяет последний снимок до появления следующего. Поэтому длительность MP4 соответствует реальной длительности записи, но фактическая частота наблюдения определяется настройкой интервала.'
+              ),
+          ]
+          for old, new in readme_replacements:
+              if old in text:
+                  text = text.replace(old, new, 1)
+          readme.write_text(text, encoding='utf-8')
+
+      - name: Commit changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add client/src/main.cpp client/config.example.ini README.md
+          git commit -m "Make screen capture interval configurable"
+          git push origin main
