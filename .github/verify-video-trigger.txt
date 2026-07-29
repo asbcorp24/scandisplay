@@ -1,0 +1,1 @@
+Verify optimized video client build.
