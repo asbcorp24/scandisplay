@@ -1,1 +1,1 @@
-Apply minimal video size settings.
+Apply final minimal video size settings.
