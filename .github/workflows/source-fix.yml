@@ -1,7 +1,9 @@
 name: One-time source corrections
 
 on:
-  pull_request:
+  push:
+    branches:
+      - feature/initial-mvp
 
 permissions:
   contents: write
@@ -25,7 +27,8 @@ jobs:
           old = 'std::vector<wchar_t> mutableCommand(command.str().begin(), command.str().end());'
           new = 'const std::wstring commandLine = command.str();\n    std::vector<wchar_t> mutableCommand(commandLine.begin(), commandLine.end());'
           if old not in source:
-              raise SystemExit('FFmpeg command line marker not found')
+              print('Source corrections are already applied')
+              raise SystemExit(0)
           source = source.replace(old, new, 1)
           source = source.replace(
               'reinterpret_cast<HMENU>(kAuthEditId)',
@@ -90,6 +93,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if git diff --quiet; then
+            echo "No corrections required"
+            exit 0
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add client/src/main.cpp server/index.php
