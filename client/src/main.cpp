@@ -457,7 +457,8 @@ bool StartFfmpeg(const fs::path& outputFile, std::wstring& error) {
             << L"-f rawvideo -pix_fmt bgr0 -video_size " << g_screenWidth << L"x" << g_screenHeight << L" "
             << L"-framerate 1 -i pipe:0 -an -vf fps=25 -c:v libx264 -preset veryfast -crf 23 "
             << L"-pix_fmt yuv420p -movflags +faststart \"" << outputFile.wstring() << L"\"";
-    std::vector<wchar_t> mutableCommand(command.str().begin(), command.str().end());
+    const std::wstring commandLine = command.str();
+    std::vector<wchar_t> mutableCommand(commandLine.begin(), commandLine.end());
     mutableCommand.push_back(L'\0');
 
     STARTUPINFOW startup{};
@@ -870,10 +871,12 @@ LRESULT CALLBACK AuthWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM
                 24, 22, 370, 22, window, nullptr, g_instance, nullptr);
             g_authEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-                24, 52, 370, 30, window, reinterpret_cast<HMENU>(kAuthEditId), g_instance, nullptr);
+                24, 52, 370, 30, window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kAuthEditId)), g_instance, nullptr);
             CreateWindowW(L"BUTTON", L"Авторизоваться",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-                24, 96, 180, 34, window, reinterpret_cast<HMENU>(kAuthButtonId), g_instance, nullptr);
+                24, 96, 180, 34, window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kAuthButtonId)), g_instance, nullptr);
             g_authStatus = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE,
                 24, 142, 370, 42, window, nullptr, g_instance, nullptr);
             SendMessageW(g_authEdit, EM_SETLIMITTEXT, 32, 0);
