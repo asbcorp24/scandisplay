@@ -18,7 +18,7 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      - name: Optimize video encoding
+      - name: Optimize video resolution and still-image encoding
         shell: python
         run: |
           from pathlib import Path
@@ -28,33 +28,30 @@ jobs:
 
           replacements = [
               (
-                  '    int captureIntervalSeconds = 30;\n    DWORD timeoutMs = 120000;',
-                  '    int captureIntervalSeconds = 30;\n    int videoMaxWidth = 1280;\n    int videoCrf = 32;\n    DWORD timeoutMs = 120000;'
+                  '    int captureIntervalSeconds = 30;\n    int videoCrf = 35;\n    std::wstring videoPreset = L"veryslow";',
+                  '    int captureIntervalSeconds = 30;\n    int videoMaxWidth = 1280;\n    int videoCrf = 35;\n    std::wstring videoPreset = L"veryslow";'
               ),
               (
-                  '    } catch (...) {\n        g_config.captureIntervalSeconds = 30;\n    }\n\n    try {\n        const int seconds = std::stoi(ReadIni(configPath, L"client", L"request_timeout_seconds", L"120"));',
-                  '    } catch (...) {\n        g_config.captureIntervalSeconds = 30;\n    }\n\n    try {\n        const int width = std::stoi(ReadIni(configPath, L"recording", L"video_max_width", L"1280"));\n        g_config.videoMaxWidth = width < 320 ? 320 : width;\n    } catch (...) {\n        g_config.videoMaxWidth = 1280;\n    }\n\n    try {\n        int crf = std::stoi(ReadIni(configPath, L"recording", L"video_crf", L"32"));\n        if (crf < 18) crf = 18;\n        if (crf > 45) crf = 45;\n        g_config.videoCrf = crf;\n    } catch (...) {\n        g_config.videoCrf = 32;\n    }\n\n    try {\n        const int seconds = std::stoi(ReadIni(configPath, L"client", L"request_timeout_seconds", L"120"));'
+                  '    } catch (...) {\n        g_config.captureIntervalSeconds = 30;\n    }\n\n    try {\n        const int crf = std::stoi(ReadIni(configPath, L"recording", L"video_crf", L"35"));',
+                  '    } catch (...) {\n        g_config.captureIntervalSeconds = 30;\n    }\n\n    try {\n        const int width = std::stoi(ReadIni(configPath, L"recording", L"video_max_width", L"1280"));\n        g_config.videoMaxWidth = width < 320 ? 320 : width;\n    } catch (...) {\n        g_config.videoMaxWidth = 1280;\n    }\n\n    try {\n        const int crf = std::stoi(ReadIni(configPath, L"recording", L"video_crf", L"35"));'
               ),
               (
-                  '    std::wstringstream command;\n    command << L\'"\' << g_config.ffmpegPath << L"\\\" -y -hide_banner -loglevel error "\n            << L"-f rawvideo -pix_fmt bgr0 -video_size " << g_screenWidth << L"x" << g_screenHeight << L" "\n            << L"-framerate 1/" << g_config.captureIntervalSeconds\n            << L" -i pipe:0 -an -vf fps=25 -c:v libx264 -preset veryfast -crf 23 "\n            << L"-pix_fmt yuv420p -movflags +faststart \\\"" << outputFile.wstring() << L"\\\"";',
-                  '    int outputWidth = g_screenWidth;\n    int outputHeight = g_screenHeight;\n    if (outputWidth > g_config.videoMaxWidth) {\n        outputWidth = g_config.videoMaxWidth;\n        outputHeight = static_cast<int>((static_cast<std::int64_t>(g_screenHeight) * outputWidth) / g_screenWidth);\n    }\n    outputWidth = max(2, outputWidth - (outputWidth % 2));\n    outputHeight = max(2, outputHeight - (outputHeight % 2));\n\n    std::wstringstream command;\n    command << L\'"\' << g_config.ffmpegPath << L"\\\" -y -hide_banner -loglevel error "\n            << L"-f rawvideo -pix_fmt bgr0 -video_size " << g_screenWidth << L"x" << g_screenHeight << L" "\n            << L"-framerate 1/" << g_config.captureIntervalSeconds\n            << L" -i pipe:0 -an -vf scale=" << outputWidth << L":" << outputHeight << L":flags=area "\n            << L"-fps_mode passthrough -c:v libx264 -preset veryslow -tune stillimage -crf "\n            << g_config.videoCrf << L" -pix_fmt yuv420p -movflags +faststart \\\""\n            << outputFile.wstring() << L"\\\"";'
+                  '    std::wstringstream command;\n    command << L\'"\' << g_config.ffmpegPath << L"\\\" -y -hide_banner -loglevel error "\n            << L"-f rawvideo -pix_fmt bgr0 -video_size " << g_screenWidth << L"x" << g_screenHeight << L" "\n            << L"-framerate 1/" << g_config.captureIntervalSeconds\n            << L" -i pipe:0 -an -fps_mode passthrough -c:v libx264 -preset "\n            << g_config.videoPreset << L" -crf " << g_config.videoCrf << L" "\n            << L"-pix_fmt yuv420p -movflags +faststart \\\"" << outputFile.wstring() << L"\\\"";',
+                  '    int outputWidth = g_screenWidth;\n    int outputHeight = g_screenHeight;\n    if (outputWidth > g_config.videoMaxWidth) {\n        outputWidth = g_config.videoMaxWidth;\n        outputHeight = static_cast<int>((static_cast<std::int64_t>(g_screenHeight) * outputWidth) / g_screenWidth);\n    }\n    outputWidth = max(2, outputWidth - (outputWidth % 2));\n    outputHeight = max(2, outputHeight - (outputHeight % 2));\n\n    std::wstringstream command;\n    command << L\'"\' << g_config.ffmpegPath << L"\\\" -y -hide_banner -loglevel error "\n            << L"-f rawvideo -pix_fmt bgr0 -video_size " << g_screenWidth << L"x" << g_screenHeight << L" "\n            << L"-framerate 1/" << g_config.captureIntervalSeconds\n            << L" -i pipe:0 -an -vf scale=" << outputWidth << L":" << outputHeight << L":flags=area "\n            << L"-fps_mode passthrough -c:v libx264 -preset " << g_config.videoPreset\n            << L" -tune stillimage -crf " << g_config.videoCrf << L" "\n            << L"-pix_fmt yuv420p -movflags +faststart \\\"" << outputFile.wstring() << L"\\\"";'
               ),
           ]
 
           for old, new in replacements:
               if old not in source:
-                  raise SystemExit(f'Expected main.cpp fragment not found: {old[:160]!r}')
+                  raise SystemExit(f'Expected main.cpp fragment not found: {old[:180]!r}')
               source = source.replace(old, new, 1)
 
           main.write_text(source, encoding='utf-8')
 
           config = Path('client/config.example.ini')
           config_text = config.read_text(encoding='utf-8')
-          old_config = 'capture_interval_seconds=30\ndelete_after_upload=0'
-          new_config = ('capture_interval_seconds=30\n'
-                        'video_max_width=1280\n'
-                        'video_crf=32\n'
-                        'delete_after_upload=0')
+          old_config = 'capture_interval_seconds=30\nvideo_crf=35'
+          new_config = 'capture_interval_seconds=30\nvideo_max_width=1280\nvideo_crf=35'
           if old_config not in config_text:
               raise SystemExit('Expected config.example.ini fragment not found')
           config.write_text(config_text.replace(old_config, new_config, 1), encoding='utf-8')
@@ -62,33 +59,31 @@ jobs:
           readme = Path('README.md')
           text = readme.read_text(encoding='utf-8')
 
-          old_ini = ('capture_interval_seconds=30\n'
-                     'delete_after_upload=0')
-          new_ini = ('capture_interval_seconds=30\n'
-                     'video_max_width=1280\n'
-                     'video_crf=32\n'
-                     'delete_after_upload=0')
+          old_ini = 'capture_interval_seconds=30\nvideo_crf=35'
+          new_ini = 'capture_interval_seconds=30\nvideo_max_width=1280\nvideo_crf=35'
           if old_ini not in text:
               raise SystemExit('Expected README config fragment not found')
           text = text.replace(old_ini, new_ini, 1)
 
-          marker = ('- после изменения параметра программу необходимо перезапустить.\n\n'
-                    '`delete_after_upload`:')
-          replacement = ('- после изменения параметра программу необходимо перезапустить.\n\n'
-                         '`video_max_width` — максимальная ширина готового видео. По умолчанию используется `1280`. Если исходный экран шире, он уменьшается с сохранением пропорций; маленькие экраны не увеличиваются. Значение `960` даст ещё меньший файл, а `1920` — более чёткое изображение и больший размер. Минимально допустимое значение — `320`.\n\n'
-                         '`video_crf` — степень сжатия H.264. По умолчанию используется `32`. Чем больше значение, тем меньше файл и ниже качество. Допустимый диапазон — от `18` до `45`. Для минимального размера можно установить `36`, для более чёткого текста — `28`.\n\n'
-                         'Даже если этих двух параметров нет в старом `config.ini`, клиент применит значения `1280` и `32` автоматически.\n\n'
-                         '`delete_after_upload`:')
+          marker = '`video_crf` — степень сжатия H.264. Чем больше значение, тем меньше файл и ниже качество:'
+          width_docs = ('`video_max_width` — максимальная ширина готового видео:\n\n'
+                        '```ini\n'
+                        'video_max_width=1280\n'
+                        '```\n\n'
+                        '- по умолчанию видео уменьшается максимум до ширины `1280` пикселей;\n'
+                        '- пропорции сохраняются, маленькие экраны не увеличиваются;\n'
+                        '- для ещё меньшего файла можно установить `960`;\n'
+                        '- для более чёткого текста можно установить `1600` или `1920`;\n'
+                        '- минимально допустимое значение — `320`.\n\n'
+                        + marker)
           if marker not in text:
-              raise SystemExit('Expected README parameter marker not found')
-          text = text.replace(marker, replacement, 1)
+              raise SystemExit('Expected README video_crf marker not found')
+          text = text.replace(marker, width_docs, 1)
 
-          old_format = ('Клиент получает новый кадр через интервал `capture_interval_seconds`. По умолчанию это один кадр каждые 30 секунд, минимальный интервал — одна секунда.\n\n'
-                        'Для совместимости с браузерными проигрывателями FFmpeg создаёт стандартный видеопоток 25 кадров/с и повторяет последний снимок до появления следующего. Временная шкала MP4 учитывает выбранный интервал, поэтому длительность видео соответствует реальной длительности записи.')
-          new_format = ('Клиент получает новый кадр через интервал `capture_interval_seconds`. По умолчанию это один кадр каждые 30 секунд, минимальный интервал — одна секунда.\n\n'
-                        'В MP4 записываются только реально снятые кадры — программа больше не создаёт 25 повторяющихся кадров каждую секунду. Временные метки сохраняют реальную длительность записи. Для уменьшения размера изображение при необходимости сжимается до `video_max_width`, а H.264 кодируется через `libx264` с профилем для статичных изображений, медленным пресетом и качеством `video_crf`.')
+          old_format = ('FFmpeg сохраняет только фактически снятые кадры и не создаёт искусственные 25 кадров/с. Временные метки каждого кадра сохраняются в MP4, поэтому длительность видео соответствует реальной длительности записи. Кодирование H.264 выполняется с высоким сжатием, без звука и без лишних дублированных кадров.')
+          new_format = ('FFmpeg сохраняет только фактически снятые кадры и не создаёт искусственные 25 кадров/с. Временные метки каждого кадра сохраняются в MP4, поэтому длительность видео соответствует реальной длительности записи. Перед кодированием изображение при необходимости уменьшается до `video_max_width`. Кодирование H.264 выполняется с высоким сжатием, настройкой `stillimage`, без звука и без лишних дублированных кадров.')
           if old_format not in text:
-              raise SystemExit('Expected README format section not found')
+              raise SystemExit('Expected README format paragraph not found')
           text = text.replace(old_format, new_format, 1)
 
           readme.write_text(text, encoding='utf-8')
@@ -100,5 +95,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add client/src/main.cpp client/config.example.ini README.md
-          git commit -m "Minimize recorded video size"
+          git commit -m "Reduce video resolution for smaller files"
           git push origin main
