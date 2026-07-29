@@ -51,6 +51,7 @@ struct Config {
     fs::path outputDir;
     bool deleteAfterUpload = false;
     int captureIntervalSeconds = 30;
+    int videoMaxWidth = 1280;
     int videoCrf = 35;
     std::wstring videoPreset = L"veryslow";
     DWORD timeoutMs = 120000;
@@ -129,6 +130,13 @@ bool LoadConfig(std::wstring& error) {
         g_config.captureIntervalSeconds = interval < 1 ? 1 : interval;
     } catch (...) {
         g_config.captureIntervalSeconds = 30;
+    }
+
+    try {
+        const int width = std::stoi(ReadIni(configPath, L"recording", L"video_max_width", L"1280"));
+        g_config.videoMaxWidth = width < 320 ? 320 : width;
+    } catch (...) {
+        g_config.videoMaxWidth = 1280;
     }
 
     try {
@@ -475,12 +483,22 @@ bool StartFfmpeg(const fs::path& outputFile, std::wstring& error) {
     HANDLE nullOutput = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
         &security, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
 
+    int outputWidth = g_screenWidth;
+    int outputHeight = g_screenHeight;
+    if (outputWidth > g_config.videoMaxWidth) {
+        outputWidth = g_config.videoMaxWidth;
+        outputHeight = static_cast<int>((static_cast<std::int64_t>(g_screenHeight) * outputWidth) / g_screenWidth);
+    }
+    outputWidth = max(2, outputWidth - (outputWidth % 2));
+    outputHeight = max(2, outputHeight - (outputHeight % 2));
+
     std::wstringstream command;
     command << L'"' << g_config.ffmpegPath << L"\" -y -hide_banner -loglevel error "
             << L"-f rawvideo -pix_fmt bgr0 -video_size " << g_screenWidth << L"x" << g_screenHeight << L" "
             << L"-framerate 1/" << g_config.captureIntervalSeconds
-            << L" -i pipe:0 -an -fps_mode passthrough -c:v libx264 -preset "
-            << g_config.videoPreset << L" -crf " << g_config.videoCrf << L" "
+            << L" -i pipe:0 -an -vf scale=" << outputWidth << L":" << outputHeight << L":flags=area "
+            << L"-fps_mode passthrough -c:v libx264 -preset " << g_config.videoPreset
+            << L" -tune stillimage -crf " << g_config.videoCrf << L" "
             << L"-pix_fmt yuv420p -movflags +faststart \"" << outputFile.wstring() << L"\"";
     const std::wstring commandLine = command.str();
     std::vector<wchar_t> mutableCommand(commandLine.begin(), commandLine.end());
