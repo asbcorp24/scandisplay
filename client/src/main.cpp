@@ -51,6 +51,8 @@ struct Config {
     fs::path outputDir;
     bool deleteAfterUpload = false;
     int captureIntervalSeconds = 30;
+    int videoCrf = 35;
+    std::wstring videoPreset = L"veryslow";
     DWORD timeoutMs = 120000;
 };
 
@@ -127,6 +129,19 @@ bool LoadConfig(std::wstring& error) {
         g_config.captureIntervalSeconds = interval < 1 ? 1 : interval;
     } catch (...) {
         g_config.captureIntervalSeconds = 30;
+    }
+
+    try {
+        const int crf = std::stoi(ReadIni(configPath, L"recording", L"video_crf", L"35"));
+        g_config.videoCrf = max(18, min(45, crf));
+    } catch (...) {
+        g_config.videoCrf = 35;
+    }
+
+    g_config.videoPreset = ReadIni(configPath, L"recording", L"video_preset", L"veryslow");
+    if (g_config.videoPreset != L"medium" && g_config.videoPreset != L"slow" &&
+        g_config.videoPreset != L"slower" && g_config.videoPreset != L"veryslow") {
+        g_config.videoPreset = L"veryslow";
     }
 
     try {
@@ -464,7 +479,8 @@ bool StartFfmpeg(const fs::path& outputFile, std::wstring& error) {
     command << L'"' << g_config.ffmpegPath << L"\" -y -hide_banner -loglevel error "
             << L"-f rawvideo -pix_fmt bgr0 -video_size " << g_screenWidth << L"x" << g_screenHeight << L" "
             << L"-framerate 1/" << g_config.captureIntervalSeconds
-            << L" -i pipe:0 -an -vf fps=25 -c:v libx264 -preset veryfast -crf 23 "
+            << L" -i pipe:0 -an -fps_mode passthrough -c:v libx264 -preset "
+            << g_config.videoPreset << L" -crf " << g_config.videoCrf << L" "
             << L"-pix_fmt yuv420p -movflags +faststart \"" << outputFile.wstring() << L"\"";
     const std::wstring commandLine = command.str();
     std::vector<wchar_t> mutableCommand(commandLine.begin(), commandLine.end());
