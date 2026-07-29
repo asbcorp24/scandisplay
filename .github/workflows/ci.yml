@@ -1,0 +1,38 @@
+name: ScanDisplay CI
+
+on:
+  push:
+    branches:
+      - main
+      - feature/**
+  pull_request:
+
+jobs:
+  php-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite, mbstring, fileinfo
+      - name: Lint PHP files
+        shell: bash
+        run: |
+          set -euo pipefail
+          find server -type f -name '*.php' -print0 | xargs -0 -n1 php -l
+
+  windows-client:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S client -B client/build -A x64
+      - name: Build
+        run: cmake --build client/build --config Release --parallel
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScanDisplay-Windows-x64
+          path: client/build/Release/ScanDisplay.exe
+          if-no-files-found: error
