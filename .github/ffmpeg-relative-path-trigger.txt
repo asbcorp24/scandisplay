@@ -1,0 +1,1 @@
+Resolve ffmpeg.exe relative to ScanDisplay.exe.
