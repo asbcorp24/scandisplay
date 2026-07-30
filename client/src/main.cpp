@@ -31,6 +31,8 @@ constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kFinalizeMessage = WM_APP + 2;
 constexpr UINT kCaptureFailedMessage = WM_APP + 3;
 constexpr UINT kTrayId = 1;
+constexpr UINT_PTR kTrayStatusTimerId = 1;
+constexpr UINT kTrayStatusIntervalMs = 1000;
 
 constexpr UINT kMenuAuth = 1001;
 constexpr UINT kMenuStart = 1002;
@@ -96,6 +98,7 @@ PROCESS_INFORMATION g_ffmpegProcess{};
 fs::path g_outputFile;
 std::wstring g_startedAt;
 std::wstring g_recordingTitle;
+std::chrono::steady_clock::time_point g_recordingStartedSteady{};
 int g_screenX = 0;
 int g_screenY = 0;
 int g_screenWidth = 0;
@@ -791,6 +794,57 @@ bool UploadVideo(const fs::path& file, const std::wstring& startedAt, const std:
     return success;
 }
 
+std::wstring FormatFileSize(std::uintmax_t bytes) {
+    if (bytes < 1024ULL) return std::to_wstring(bytes) + L" Б";
+
+    double value = static_cast<double>(bytes);
+    std::wstring unit = L"КБ";
+    value /= 1024.0;
+    if (value >= 1024.0) {
+        value /= 1024.0;
+        unit = L"МБ";
+    }
+    if (value >= 1024.0) {
+        value /= 1024.0;
+        unit = L"ГБ";
+    }
+
+    std::wstringstream output;
+    output << std::fixed << std::setprecision(value >= 100.0 ? 0 : 1)
+           << value << L" " << unit;
+    return output.str();
+}
+
+void UpdateTrayTooltip() {
+    std::wstring tooltip = L"ScanDisplay — запись экрана";
+    const AppState state = g_state.load();
+
+    std::error_code fileError;
+    const std::uintmax_t fileSize = !g_outputFile.empty() && fs::exists(g_outputFile, fileError)
+        ? fs::file_size(g_outputFile, fileError)
+        : 0;
+
+    if (state == AppState::Recording) {
+        const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - g_recordingStartedSteady).count();
+        const long long minutes = elapsed / 60;
+        const long long seconds = elapsed % 60;
+
+        std::wstringstream text;
+        text << L"Запись: " << minutes << L" мин "
+             << std::setw(2) << std::setfill(L'0') << seconds
+             << L" сек | " << FormatFileSize(fileSize);
+        tooltip = text.str();
+    } else if (state == AppState::Finalizing) {
+        tooltip = L"Обработка видео | " + FormatFileSize(fileSize);
+    }
+
+    g_tray.uFlags = NIF_TIP;
+    wcsncpy_s(g_tray.szTip, _countof(g_tray.szTip), tooltip.c_str(), _TRUNCATE);
+    Shell_NotifyIconW(NIM_MODIFY, &g_tray);
+    g_tray.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+}
+
 void Notify(const std::wstring& title, const std::wstring& text, DWORD flags = NIIF_INFO) {
     g_tray.uFlags = NIF_INFO;
     wcsncpy_s(g_tray.szInfoTitle, _countof(g_tray.szInfoTitle), title.c_str(), _TRUNCATE);
@@ -875,9 +929,11 @@ void StartRecording(const std::wstring& recordingTitle) {
     }
     g_startedAt = TimestampIso();
     g_recordingTitle = recordingTitle;
+    g_recordingStartedSteady = std::chrono::steady_clock::now();
     g_recordingStudent = student;
     g_stopCapture.store(false);
     g_state.store(AppState::Recording);
+    UpdateTrayTooltip();
 
     try {
         g_captureThread = std::thread(CaptureLoop, student);
@@ -892,6 +948,7 @@ void StartRecording(const std::wstring& recordingTitle) {
         CloseHandle(g_ffmpegProcess.hProcess);
         g_ffmpegProcess = {};
         g_state.store(AppState::Idle);
+        UpdateTrayTooltip();
         MessageBoxW(g_mainWindow, L"Не удалось запустить поток записи.", L"ScanDisplay", MB_ICONERROR);
         return;
     }
@@ -903,6 +960,7 @@ void StartRecording(const std::wstring& recordingTitle) {
 void StopRecording() {
     AppState expected = AppState::Recording;
     if (!g_state.compare_exchange_strong(expected, AppState::Finalizing)) return;
+    UpdateTrayTooltip();
 
     g_stopCapture.store(true);
     g_captureWake.notify_all();
@@ -1110,6 +1168,13 @@ LRESULT CALLBACK MainWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM
             }
             break;
 
+        case WM_TIMER:
+            if (wParam == kTrayStatusTimerId) {
+                UpdateTrayTooltip();
+                return 0;
+            }
+            break;
+
         case kTrayMessage: {
             const UINT event = LOWORD(lParam);
             if (event == WM_RBUTTONUP || event == WM_CONTEXTMENU || event == WM_LBUTTONDBLCLK) {
@@ -1128,6 +1193,7 @@ LRESULT CALLBACK MainWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM
             auto* text = reinterpret_cast<std::wstring*>(lParam);
             if (g_finalizeThread.joinable()) g_finalizeThread.join();
             g_state.store(AppState::Idle);
+            UpdateTrayTooltip();
             Notify(ok ? L"Запись отправлена" : L"Ошибка записи",
                 text ? *text : L"Неизвестный результат.", ok ? NIIF_INFO : NIIF_ERROR);
             delete text;
@@ -1135,6 +1201,7 @@ LRESULT CALLBACK MainWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM
         }
 
         case WM_DESTROY:
+            KillTimer(window, kTrayStatusTimerId);
             Shell_NotifyIconW(NIM_DELETE, &g_tray);
             PostQuitMessage(0);
             return 0;
@@ -1214,6 +1281,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
     Shell_NotifyIconW(NIM_ADD, &g_tray);
     g_tray.uVersion = NOTIFYICON_VERSION_4;
     Shell_NotifyIconW(NIM_SETVERSION, &g_tray);
+    SetTimer(g_mainWindow, kTrayStatusTimerId, kTrayStatusIntervalMs, nullptr);
+    UpdateTrayTooltip();
 
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
