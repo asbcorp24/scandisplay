@@ -1,1 +1,0 @@
-Apply local administrator login and store admin.ini next to ScanDisplay.exe.
