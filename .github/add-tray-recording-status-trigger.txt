@@ -1,1 +1,1 @@
-Show recording duration and current MP4 size in the tray tooltip.
+Rebuild ScanDisplay from source commit 8697b0d804581c5c832f3adafe58d1040bc27743.
