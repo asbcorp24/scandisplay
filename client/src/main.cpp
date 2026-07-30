@@ -121,7 +121,11 @@ bool LoadConfig(std::wstring& error) {
     }
 
     g_config.baseUrl = ReadIni(configPath, L"server", L"base_url", L"");
-    g_config.ffmpegPath = ExpandEnvironment(ReadIni(configPath, L"recording", L"ffmpeg_path", L"ffmpeg.exe"));
+    const fs::path configuredFfmpeg = ExpandEnvironment(
+        ReadIni(configPath, L"recording", L"ffmpeg_path", L"ffmpeg.exe"));
+    g_config.ffmpegPath = (configuredFfmpeg.is_absolute()
+        ? configuredFfmpeg
+        : fs::path(ModuleDirectory()) / configuredFfmpeg).lexically_normal().wstring();
     g_config.outputDir = ExpandEnvironment(ReadIni(configPath, L"recording", L"output_dir", L"%LOCALAPPDATA%\\ScanDisplay\\recordings"));
     g_config.deleteAfterUpload = ReadIni(configPath, L"recording", L"delete_after_upload", L"0") == L"1";
 

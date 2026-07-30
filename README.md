@@ -216,11 +216,15 @@ ScanDisplay-Windows-x64
 C:\ScanDisplay
 ```
 
-В папке должен находиться:
+В рабочей папке должны находиться:
 
 ```text
 C:\ScanDisplay\ScanDisplay.exe
+C:\ScanDisplay\ffmpeg.exe
+C:\ScanDisplay\config.ini
 ```
+
+`ffmpeg.exe` нужно взять из установленного или скачанного комплекта FFmpeg и положить рядом с программой.
 
 ---
 
@@ -246,6 +250,7 @@ C:\xampp\htdocs\scandisplay\client\build\Release\ScanDisplay.exe
 mkdir C:\ScanDisplay
 copy client\build\Release\ScanDisplay.exe C:\ScanDisplay\ScanDisplay.exe
 copy client\config.example.ini C:\ScanDisplay\config.ini
+copy C:\ffmpeg\bin\ffmpeg.exe C:\ScanDisplay\ffmpeg.exe
 ```
 
 ---
@@ -271,7 +276,7 @@ copy C:\xampp\htdocs\scandisplay\client\config.example.ini C:\ScanDisplay\config
 base_url=http://127.0.0.1/scandisplay/server
 
 [recording]
-ffmpeg_path=C:\ffmpeg\bin\ffmpeg.exe
+ffmpeg_path=ffmpeg.exe
 output_dir=%LOCALAPPDATA%\ScanDisplay\recordings
 capture_interval_seconds=30
 video_max_width=1280
@@ -291,11 +296,13 @@ request_timeout_seconds=120
 base_url=http://127.0.0.1/scandisplay/server
 ```
 
-`ffmpeg_path` — полный путь к `ffmpeg.exe`:
+`ffmpeg_path` — путь к `ffmpeg.exe`. Рекомендуется положить файл рядом с `ScanDisplay.exe` и указать только имя файла:
 
 ```ini
-ffmpeg_path=C:\ffmpeg\bin\ffmpeg.exe
+ffmpeg_path=ffmpeg.exe
 ```
+
+Относительный путь автоматически вычисляется от папки `ScanDisplay.exe`, а не от текущей рабочей папки Windows. Абсолютные пути также поддерживаются.
 
 `output_dir` — каталог локального хранения MP4:
 
@@ -684,7 +691,7 @@ config.ini.txt
 Проверьте строку:
 
 ```ini
-ffmpeg_path=C:\ffmpeg\bin\ffmpeg.exe
+ffmpeg_path=ffmpeg.exe
 ```
 
 Затем убедитесь, что файл действительно существует:
