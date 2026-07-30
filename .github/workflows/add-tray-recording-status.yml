@@ -1,0 +1,55 @@
+name: Add tray recording status and publish client
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/add-tray-recording-status-trigger.txt
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Add recording status tooltip
+        run: python .github/add-tray-recording-status.py
+
+      - name: Configure client
+        run: cmake -S client -B client/build -A x64
+
+      - name: Build release
+        run: cmake --build client/build --config Release
+
+      - name: Publish client and clean temporary automation
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          Copy-Item client/build/Release/ScanDisplay.exe release/ScanDisplay.exe -Force
+
+          $temporaryFiles = @(
+            '.github/add-tray-recording-status-trigger.txt',
+            '.github/add-tray-recording-status.py',
+            '.github/workflows/add-tray-recording-status.yml',
+            '.github/direct-build-clean-client-trigger.txt',
+            '.github/workflows/direct-build-clean-client.yml',
+            '.github/remove-client-admin-trigger.txt',
+            '.github/remove-client-admin-and-autoconfig.py',
+            '.github/workflows/remove-client-admin-and-build.yml'
+          )
+          foreach ($file in $temporaryFiles) {
+            if (Test-Path $file) { Remove-Item $file -Force }
+          }
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git add -f release/ScanDisplay.exe
+          git commit -m "Show recording duration and file size in tray tooltip"
+          git push origin main
