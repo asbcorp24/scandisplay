@@ -1,1 +1,1 @@
-Add required student-defined recording titles.
+Retry required student-defined recording titles.
