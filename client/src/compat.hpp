@@ -120,6 +120,7 @@ inline bool DownloadFfmpeg(const fs::path& target) {
     std::vector<std::uint8_t> buffer(1024 * 1024);
     std::uint64_t total = 0;
     bool complete = false;
+    bool writeOk = true;
     for (;;) {
         DWORD available = 0;
         if (!WinHttpQueryDataAvailable(request, &available)) break;
@@ -137,13 +138,12 @@ inline bool DownloadFfmpeg(const fs::path& target) {
         while (offset < received) {
             DWORD written = 0;
             if (!WriteFile(output, buffer.data() + offset, received - offset, &written, nullptr) || written == 0) {
-                complete = false;
-                offset = received;
+                writeOk = false;
                 break;
             }
             offset += written;
         }
-        if (offset != received) break;
+        if (!writeOk) break;
         total += received;
     }
 
@@ -151,7 +151,7 @@ inline bool DownloadFfmpeg(const fs::path& target) {
     CloseHandle(output);
     output = INVALID_HANDLE_VALUE;
 
-    if (!complete || total < 1024ULL * 1024ULL) {
+    if (!complete || !writeOk || total < 1024ULL * 1024ULL) {
         cleanup();
         return false;
     }
