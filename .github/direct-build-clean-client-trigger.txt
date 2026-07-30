@@ -1,0 +1,1 @@
+Build and publish ScanDisplay client without local administrator.
