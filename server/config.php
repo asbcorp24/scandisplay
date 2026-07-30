@@ -21,4 +21,12 @@ return [
         getenv('SCANDISPLAY_PUBLIC_VIEW') === false ? '1' : getenv('SCANDISPLAY_PUBLIC_VIEW'),
         FILTER_VALIDATE_BOOLEAN
     ),
+
+    // Автоматическая выдача ffmpeg.exe клиентам.
+    // Файл по умолчанию: server/storage/ffmpeg/ffmpeg.exe.
+    'ffmpeg_download_enabled' => filter_var(
+        getenv('SCANDISPLAY_FFMPEG_DOWNLOAD') === false ? '1' : getenv('SCANDISPLAY_FFMPEG_DOWNLOAD'),
+        FILTER_VALIDATE_BOOLEAN
+    ),
+    'ffmpeg_file' => getenv('SCANDISPLAY_FFMPEG_FILE') ?: $root . '/storage/ffmpeg/ffmpeg.exe',
 ];
