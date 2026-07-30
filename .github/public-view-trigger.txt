@@ -1,1 +1,1 @@
-Integrate public video page, links, playback speed controls, PHP lint and cleanup.
+Retry public video page integration, playback speed controls, PHP lint and cleanup.
