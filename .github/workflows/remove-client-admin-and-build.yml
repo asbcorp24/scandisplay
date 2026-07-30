@@ -1,0 +1,78 @@
+name: Remove client admin and build release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/remove-client-admin-trigger.txt
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Remove client admin and add automatic config
+        run: python .github/remove-client-admin-and-autoconfig.py
+
+      - name: Commit source changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add client/src/main.cpp client/CMakeLists.txt README.md
+          git commit -m "Remove client admin and create config on first start"
+          git push origin main
+
+  build:
+    needs: patch
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Configure client
+        run: cmake -S client -B client/build -A x64
+
+      - name: Build release
+        run: cmake --build client/build --config Release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ScanDisplay-release
+          path: client/build/Release/ScanDisplay.exe
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ScanDisplay-release
+          path: built-client
+
+      - name: Publish executable and remove temporary files
+        run: |
+          mkdir -p release
+          cp built-client/ScanDisplay.exe release/ScanDisplay.exe
+          rm -f .github/remove-client-admin-trigger.txt
+          rm -f .github/remove-client-admin-and-autoconfig.py
+          rm -f .github/workflows/remove-client-admin-and-build.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git add -f release/ScanDisplay.exe
+          git commit -m "Publish client without local admin"
+          git push origin main
