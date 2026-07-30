@@ -1,0 +1,49 @@
+name: Build FFmpeg auto-download client
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/ffmpeg-autodownload-trigger.txt
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Patch client source and documentation
+        run: python tools/add_ffmpeg_autodownload.py
+
+      - name: Configure client
+        run: cmake -S client -B client/build -A x64
+
+      - name: Build client
+        run: cmake --build client/build --config Release --parallel
+
+      - name: Publish executable and commit
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release | Out-Null
+          Copy-Item client/build/Release/ScanDisplay.exe release/ScanDisplay.exe -Force
+
+          Remove-Item tools/add_ffmpeg_autodownload.py -Force
+          Remove-Item .github/ffmpeg-autodownload-trigger.txt -Force
+          Remove-Item .github/workflows/build-ffmpeg-autodownload.yml -Force
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git add -f release/ScanDisplay.exe
+          git commit -m "Download FFmpeg automatically from server"
+          git push origin main
