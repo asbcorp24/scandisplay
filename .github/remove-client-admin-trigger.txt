@@ -1,0 +1,1 @@
+Remove local client administrator and create config.ini automatically on first start.
