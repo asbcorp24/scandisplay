@@ -16,6 +16,7 @@ server/storage/videos/
 !server/storage/videos/.gitkeep
 server/storage/ffmpeg/*
 !server/storage/ffmpeg/.gitkeep
+!server/storage/ffmpeg/.htaccess
 !release/ScanDisplay.exe
 server/.env
 
