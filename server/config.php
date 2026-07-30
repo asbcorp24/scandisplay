@@ -15,4 +15,10 @@ return [
     'upload_dir' => getenv('SCANDISPLAY_UPLOAD_DIR') ?: $root . '/storage/videos',
     'max_upload_bytes' => (int) (getenv('SCANDISPLAY_MAX_UPLOAD_BYTES') ?: 2147483648),
     'student_session_days' => (int) (getenv('SCANDISPLAY_SESSION_DAYS') ?: 30),
+
+    // Открытая страница server/public.php. Для отключения задайте SCANDISPLAY_PUBLIC_VIEW=0.
+    'public_view_enabled' => filter_var(
+        getenv('SCANDISPLAY_PUBLIC_VIEW') === false ? '1' : getenv('SCANDISPLAY_PUBLIC_VIEW'),
+        FILTER_VALIDATE_BOOLEAN
+    ),
 ];
