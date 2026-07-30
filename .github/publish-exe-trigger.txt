@@ -1,1 +1,0 @@
-Build the current ScanDisplay client and publish release/ScanDisplay.exe.
