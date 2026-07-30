@@ -1,0 +1,1 @@
+Show recording duration and current MP4 size in the tray tooltip.
