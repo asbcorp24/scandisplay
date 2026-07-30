@@ -4,9 +4,10 @@ declare(strict_types=1);
 
 require __DIR__ . '/bootstrap.php';
 require_admin();
+ensure_recordings_title_column();
 
 $id = (int) ($_GET['id'] ?? 0);
-$stmt = db()->prepare('SELECT id, file_path, original_name FROM recordings WHERE id = ?');
+$stmt = db()->prepare('SELECT id, title, file_path, original_name FROM recordings WHERE id = ?');
 $stmt->execute([$id]);
 $recording = $stmt->fetch();
 if (!$recording) {
@@ -61,7 +62,8 @@ if ($status === 206) {
 
 $download = isset($_GET['download']);
 $disposition = $download ? 'attachment' : 'inline';
-$downloadName = preg_replace('/[^\pL\pN._-]+/u', '_', (string) $recording['original_name']) ?: 'recording.mp4';
+$sourceName = $download ? ((string) $recording['title'] . '.mp4') : (string) $recording['original_name'];
+$downloadName = preg_replace('/[^\pL\pN._-]+/u', '_', $sourceName) ?: 'recording.mp4';
 header("Content-Disposition: {$disposition}; filename*=UTF-8''" . rawurlencode($downloadName));
 
 $handle = fopen($path, 'rb');

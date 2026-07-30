@@ -7,6 +7,7 @@ require dirname(__DIR__) . '/bootstrap.php';
 if (!is_installed()) {
     json_response(['ok' => false, 'message' => 'Сервер не установлен.'], 503);
 }
+ensure_recordings_title_column();
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     json_response(['ok' => false, 'message' => 'Метод не поддерживается.'], 405);
 }
@@ -79,6 +80,12 @@ if (($startedAtRaw !== '' && $startedAt === null) || ($endedAtRaw !== '' && $end
     json_response(['ok' => false, 'message' => 'Некорректная дата начала или окончания записи.'], 422);
 }
 
+$title = preg_replace('/\s+/u', ' ', trim((string) ($_POST['title'] ?? ''))) ?? '';
+if ($title === '') {
+    json_response(['ok' => false, 'message' => 'Не указано название записи.'], 422);
+}
+$title = mb_substr($title, 0, 255);
+
 $computerName = trim((string) ($_POST['computer_name'] ?? $session['authorized_computer']));
 $computerName = mb_substr($computerName !== '' ? $computerName : 'unknown', 0, 255);
 $studentId = (int) $session['student_id'];
@@ -97,11 +104,12 @@ if (!move_uploaded_file($file['tmp_name'], $absolutePath)) {
 
 try {
     $stmt = $pdo->prepare(
-        'INSERT INTO recordings (student_id, file_path, original_name, file_size, started_at, ended_at, computer_name, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+        'INSERT INTO recordings (student_id, title, file_path, original_name, file_size, started_at, ended_at, computer_name, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
     );
     $stmt->execute([
         $studentId,
+        $title,
         $relativePath,
         mb_substr((string) ($file['name'] ?? 'recording.mp4'), 0, 255),
         filesize($absolutePath) ?: $fileSize,

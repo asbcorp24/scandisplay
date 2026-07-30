@@ -26,6 +26,7 @@ namespace {
 
 constexpr wchar_t kMainWindowClass[] = L"ScanDisplayMainWindow";
 constexpr wchar_t kAuthWindowClass[] = L"ScanDisplayAuthWindow";
+constexpr wchar_t kRecordingTitleWindowClass[] = L"ScanDisplayRecordingTitleWindow";
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kFinalizeMessage = WM_APP + 2;
 constexpr UINT kCaptureFailedMessage = WM_APP + 3;
@@ -37,12 +38,17 @@ constexpr UINT kMenuStop = 1003;
 constexpr UINT kMenuExit = 1004;
 constexpr UINT kAuthEditId = 2001;
 constexpr UINT kAuthButtonId = 2002;
+constexpr UINT kRecordingTitleEditId = 2101;
+constexpr UINT kRecordingTitleButtonId = 2102;
 
 HINSTANCE g_instance = nullptr;
 HWND g_mainWindow = nullptr;
 HWND g_authWindow = nullptr;
 HWND g_authEdit = nullptr;
 HWND g_authStatus = nullptr;
+HWND g_recordingTitleWindow = nullptr;
+HWND g_recordingTitleEdit = nullptr;
+HWND g_recordingTitleStatus = nullptr;
 NOTIFYICONDATAW g_tray{};
 
 struct Config {
@@ -88,6 +94,7 @@ HANDLE g_ffmpegInput = INVALID_HANDLE_VALUE;
 PROCESS_INFORMATION g_ffmpegProcess{};
 fs::path g_outputFile;
 std::wstring g_startedAt;
+std::wstring g_recordingTitle;
 int g_screenX = 0;
 int g_screenY = 0;
 int g_screenWidth = 0;
@@ -97,6 +104,13 @@ std::wstring ModuleDirectory() {
     std::vector<wchar_t> buffer(32768);
     const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
     return fs::path(std::wstring(buffer.data(), length)).parent_path().wstring();
+}
+
+std::wstring TrimText(const std::wstring& value) {
+    const size_t first = value.find_first_not_of(L" \t\r\n");
+    if (first == std::wstring::npos) return {};
+    const size_t last = value.find_last_not_of(L" \t\r\n");
+    return value.substr(first, last - first + 1);
 }
 
 std::wstring ExpandEnvironment(const std::wstring& value) {
@@ -631,7 +645,7 @@ bool WriteHttpData(HINTERNET request, const void* data, DWORD size) {
 }
 
 bool UploadVideo(const fs::path& file, const std::wstring& startedAt, const std::wstring& endedAt,
-                 const StudentSession& student, std::wstring& error) {
+                 const std::wstring& recordingTitle, const StudentSession& student, std::wstring& error) {
     ParsedUrl parsed;
     if (!ParseUrl(JoinUrl(g_config.baseUrl, L"/api/upload.php"), parsed)) {
         error = L"Некорректный URL загрузки.";
@@ -658,6 +672,7 @@ bool UploadVideo(const fs::path& file, const std::wstring& startedAt, const std:
     };
 
     std::string prefix;
+    prefix += field("title", recordingTitle);
     prefix += field("started_at", startedAt);
     prefix += field("ended_at", endedAt);
     prefix += field("computer_name", ComputerName());
@@ -754,7 +769,7 @@ void Notify(const std::wstring& title, const std::wstring& text, DWORD flags = N
 }
 
 void FinalizeRecording(fs::path outputFile, std::wstring startedAt, std::wstring endedAt,
-                       StudentSession student) {
+                       std::wstring recordingTitle, StudentSession student) {
     if (g_captureThread.joinable()) g_captureThread.join();
 
     DWORD exitCode = 1;
@@ -771,7 +786,7 @@ void FinalizeRecording(fs::path outputFile, std::wstring startedAt, std::wstring
     if (!ok && error.empty()) {
         error = L"FFmpeg завершился с кодом " + std::to_wstring(exitCode) + L".";
     }
-    if (ok) ok = UploadVideo(outputFile, startedAt, endedAt, student, error);
+    if (ok) ok = UploadVideo(outputFile, startedAt, endedAt, recordingTitle, student, error);
 
     if (ok && g_config.deleteAfterUpload) {
         std::error_code ec;
@@ -784,7 +799,7 @@ void FinalizeRecording(fs::path outputFile, std::wstring startedAt, std::wstring
     PostMessageW(g_mainWindow, kFinalizeMessage, ok ? 1 : 0, reinterpret_cast<LPARAM>(message));
 }
 
-void StartRecording() {
+void StartRecording(const std::wstring& recordingTitle) {
     if (g_state.load() != AppState::Idle) return;
 
     StudentSession student;
@@ -827,6 +842,7 @@ void StartRecording() {
         g_captureError.clear();
     }
     g_startedAt = TimestampIso();
+    g_recordingTitle = recordingTitle;
     g_recordingStudent = student;
     g_stopCapture.store(false);
     g_state.store(AppState::Recording);
@@ -848,7 +864,7 @@ void StartRecording() {
         return;
     }
 
-    Notify(L"ScanDisplay", L"Запись экрана начата. Интервал кадров: " +
+    Notify(L"ScanDisplay", L"Запись начата: " + recordingTitle + L". Интервал кадров: " +
         std::to_wstring(g_config.captureIntervalSeconds) + L" сек.");
 }
 
@@ -861,7 +877,8 @@ void StopRecording() {
     const std::wstring endedAt = TimestampIso();
 
     if (g_finalizeThread.joinable()) g_finalizeThread.join();
-    g_finalizeThread = std::thread(FinalizeRecording, g_outputFile, g_startedAt, endedAt, g_recordingStudent);
+    g_finalizeThread = std::thread(FinalizeRecording, g_outputFile, g_startedAt, endedAt,
+        g_recordingTitle, g_recordingStudent);
     Notify(L"ScanDisplay", L"Запись остановлена. MP4 завершается и отправляется на сервер.");
 }
 
@@ -972,12 +989,87 @@ LRESULT CALLBACK AuthWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM
     return DefWindowProcW(window, message, wParam, lParam);
 }
 
+void OpenRecordingTitleWindow() {
+    if (g_state.load() != AppState::Idle) return;
+
+    StudentSession student;
+    {
+        std::lock_guard<std::mutex> lock(g_studentMutex);
+        student = g_student;
+    }
+    if (!student.authorized()) {
+        MessageBoxW(g_mainWindow, L"Сначала выполните авторизацию по цифровому коду студента.",
+            L"ScanDisplay", MB_ICONWARNING);
+        return;
+    }
+
+    if (g_recordingTitleWindow && IsWindow(g_recordingTitleWindow)) {
+        ShowWindow(g_recordingTitleWindow, SW_RESTORE);
+        SetForegroundWindow(g_recordingTitleWindow);
+        return;
+    }
+
+    g_recordingTitleWindow = CreateWindowExW(WS_EX_DLGMODALFRAME, kRecordingTitleWindowClass,
+        L"Новая запись ScanDisplay", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+        CW_USEDEFAULT, CW_USEDEFAULT, 540, 235, g_mainWindow, nullptr, g_instance, nullptr);
+    ShowWindow(g_recordingTitleWindow, SW_SHOW);
+    UpdateWindow(g_recordingTitleWindow);
+}
+
+LRESULT CALLBACK RecordingTitleWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    switch (message) {
+        case WM_CREATE:
+            CreateWindowW(L"STATIC", L"Введите название работы или задания:", WS_CHILD | WS_VISIBLE,
+                24, 22, 470, 22, window, nullptr, g_instance, nullptr);
+            g_recordingTitleEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                24, 52, 470, 30, window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kRecordingTitleEditId)), g_instance, nullptr);
+            CreateWindowW(L"BUTTON", L"Начать запись",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                24, 96, 190, 34, window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kRecordingTitleButtonId)), g_instance, nullptr);
+            g_recordingTitleStatus = CreateWindowW(L"STATIC", L"Название будет сохранено вместе с видео.",
+                WS_CHILD | WS_VISIBLE, 24, 142, 470, 42, window, nullptr, g_instance, nullptr);
+            SendMessageW(g_recordingTitleEdit, EM_SETLIMITTEXT, 255, 0);
+            SetFocus(g_recordingTitleEdit);
+            return 0;
+
+        case WM_COMMAND:
+            if (LOWORD(wParam) == kRecordingTitleButtonId) {
+                wchar_t buffer[256]{};
+                GetWindowTextW(g_recordingTitleEdit, buffer, _countof(buffer));
+                const std::wstring recordingTitle = TrimText(buffer);
+                if (recordingTitle.empty()) {
+                    SetWindowTextW(g_recordingTitleStatus, L"Введите название записи.");
+                    SetFocus(g_recordingTitleEdit);
+                    return 0;
+                }
+                DestroyWindow(window);
+                StartRecording(recordingTitle);
+                return 0;
+            }
+            break;
+
+        case WM_CLOSE:
+            DestroyWindow(window);
+            return 0;
+
+        case WM_DESTROY:
+            g_recordingTitleWindow = nullptr;
+            g_recordingTitleEdit = nullptr;
+            g_recordingTitleStatus = nullptr;
+            return 0;
+    }
+    return DefWindowProcW(window, message, wParam, lParam);
+}
+
 LRESULT CALLBACK MainWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
         case WM_COMMAND:
             switch (LOWORD(wParam)) {
                 case kMenuAuth: OpenAuthWindow(); return 0;
-                case kMenuStart: StartRecording(); return 0;
+                case kMenuStart: OpenRecordingTitleWindow(); return 0;
                 case kMenuStop: StopRecording(); return 0;
                 case kMenuExit:
                     if (g_state.load() == AppState::Idle) DestroyWindow(window);
@@ -1030,7 +1122,14 @@ bool RegisterWindows() {
     authClass.lpfnWndProc = AuthWindowProc;
     authClass.lpszClassName = kAuthWindowClass;
     authClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
-    return RegisterClassExW(&mainClass) != 0 && RegisterClassExW(&authClass) != 0;
+
+    WNDCLASSEXW titleClass = mainClass;
+    titleClass.lpfnWndProc = RecordingTitleWindowProc;
+    titleClass.lpszClassName = kRecordingTitleWindowClass;
+    titleClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+
+    return RegisterClassExW(&mainClass) != 0 && RegisterClassExW(&authClass) != 0 &&
+        RegisterClassExW(&titleClass) != 0;
 }
 
 } // namespace

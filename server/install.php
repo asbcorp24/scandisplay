@@ -63,6 +63,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$installed) {
                     "CREATE TABLE IF NOT EXISTS recordings (
                         id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
                         student_id BIGINT UNSIGNED NOT NULL,
+                        title VARCHAR(255) NOT NULL,
                         file_path VARCHAR(1024) NOT NULL,
                         original_name VARCHAR(255) NOT NULL,
                         file_size BIGINT UNSIGNED NOT NULL,
@@ -114,6 +115,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$installed) {
                     "CREATE TABLE IF NOT EXISTS recordings (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         student_id INTEGER NOT NULL,
+                        title TEXT NOT NULL,
                         file_path TEXT NOT NULL,
                         original_name TEXT NOT NULL,
                         file_size INTEGER NOT NULL,

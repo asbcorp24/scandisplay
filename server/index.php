@@ -8,6 +8,7 @@ if (!is_installed()) {
     header('Location: install.php');
     exit;
 }
+ensure_recordings_title_column();
 
 $pdo = db();
 $loginError = '';
@@ -207,6 +208,7 @@ $recordings = [];
 $recordingStudents = [];
 $selectedGroup = (int) ($_GET['group_id'] ?? 0);
 $selectedStudent = (int) ($_GET['student_id'] ?? 0);
+$titleQuery = mb_substr(trim((string) ($_GET['title'] ?? '')), 0, 255);
 $dateFrom = trim((string) ($_GET['date_from'] ?? ''));
 $dateTo = trim((string) ($_GET['date_to'] ?? ''));
 
@@ -222,6 +224,7 @@ if ($page === 'recordings') {
     $params = [];
     if ($selectedGroup > 0) { $where[] = 's.group_id = ?'; $params[] = $selectedGroup; }
     if ($selectedStudent > 0) { $where[] = 'r.student_id = ?'; $params[] = $selectedStudent; }
+    if ($titleQuery !== '') { $where[] = 'r.title LIKE ?'; $params[] = '%' . $titleQuery . '%'; }
     if ($dateFrom !== '') { $where[] = 'r.created_at >= ?'; $params[] = $dateFrom . ' 00:00:00'; }
     if ($dateTo !== '') { $where[] = 'r.created_at <= ?'; $params[] = $dateTo . ' 23:59:59'; }
 
@@ -304,11 +307,12 @@ if ($page === 'dashboard') {
         <div class="card border-0 shadow-sm">
             <div class="card-header bg-white py-3 d-flex justify-content-between"><strong>Последние записи</strong><a href="?page=recordings">Открыть архив</a></div>
             <div class="table-responsive"><table class="table table-hover mb-0">
-                <thead><tr><th>Дата</th><th>Группа</th><th>Студент</th><th>Компьютер</th><th>Размер</th><th></th></tr></thead>
+                <thead><tr><th>Дата</th><th>Название</th><th>Группа</th><th>Студент</th><th>Компьютер</th><th>Размер</th><th></th></tr></thead>
                 <tbody>
                 <?php foreach ($recent as $record): ?>
                     <tr>
                         <td><?= h($record['created_at']) ?></td>
+                        <td><strong><?= h($record['title']) ?></strong></td>
                         <td><?= h($record['group_name']) ?></td>
                         <td><?= h($record['last_name'] . ' ' . $record['first_name']) ?></td>
                         <td><?= h($record['computer_name']) ?></td>
@@ -316,7 +320,7 @@ if ($page === 'dashboard') {
                         <td><a class="btn btn-sm btn-outline-primary" href="?page=recordings&student_id=<?= (int) $record['student_id'] ?>">Смотреть</a></td>
                     </tr>
                 <?php endforeach; ?>
-                <?php if (!$recent): ?><tr><td colspan="6" class="text-center text-secondary py-5">Записей пока нет</td></tr><?php endif; ?>
+                <?php if (!$recent): ?><tr><td colspan="7" class="text-center text-secondary py-5">Записей пока нет</td></tr><?php endif; ?>
                 </tbody>
             </table></div>
         </div>
@@ -446,11 +450,13 @@ if ($page === 'dashboard') {
             <h1 class="h4 mb-3">Архив видеозаписей</h1>
             <form class="row g-3 align-items-end" method="get">
                 <input type="hidden" name="page" value="recordings">
-                <div class="col-md-3"><label class="form-label">Группа</label><select class="form-select" name="group_id"><option value="0">Все группы</option><?php foreach ($groupOptions as $group): ?><option value="<?= (int) $group['id'] ?>" <?= $selectedGroup === (int) $group['id'] ? 'selected' : '' ?>><?= h($group['name']) ?></option><?php endforeach; ?></select></div>
-                <div class="col-md-3"><label class="form-label">Студент</label><select class="form-select" name="student_id"><option value="0">Все студенты</option><?php foreach ($recordingStudents as $student): ?><option value="<?= (int) $student['id'] ?>" <?= $selectedStudent === (int) $student['id'] ? 'selected' : '' ?>><?= h($student['group_name'] . ' — ' . $student['last_name'] . ' ' . $student['first_name']) ?></option><?php endforeach; ?></select></div>
-                <div class="col-md-2"><label class="form-label">С даты</label><input class="form-control" type="date" name="date_from" value="<?= h($dateFrom) ?>"></div>
-                <div class="col-md-2"><label class="form-label">По дату</label><input class="form-control" type="date" name="date_to" value="<?= h($dateTo) ?>"></div>
-                <div class="col-md-2"><button class="btn btn-primary w-100">Применить</button></div>
+                <div class="col-md-4"><label class="form-label">Название записи</label><input class="form-control" name="title" value="<?= h($titleQuery) ?>" placeholder="Например, Лабораторная работа № 2"></div>
+                <div class="col-md-4"><label class="form-label">Группа</label><select class="form-select" name="group_id"><option value="0">Все группы</option><?php foreach ($groupOptions as $group): ?><option value="<?= (int) $group['id'] ?>" <?= $selectedGroup === (int) $group['id'] ? 'selected' : '' ?>><?= h($group['name']) ?></option><?php endforeach; ?></select></div>
+                <div class="col-md-4"><label class="form-label">Студент</label><select class="form-select" name="student_id"><option value="0">Все студенты</option><?php foreach ($recordingStudents as $student): ?><option value="<?= (int) $student['id'] ?>" <?= $selectedStudent === (int) $student['id'] ? 'selected' : '' ?>><?= h($student['group_name'] . ' — ' . $student['last_name'] . ' ' . $student['first_name']) ?></option><?php endforeach; ?></select></div>
+                <div class="col-md-3"><label class="form-label">С даты</label><input class="form-control" type="date" name="date_from" value="<?= h($dateFrom) ?>"></div>
+                <div class="col-md-3"><label class="form-label">По дату</label><input class="form-control" type="date" name="date_to" value="<?= h($dateTo) ?>"></div>
+                <div class="col-md-3"><button class="btn btn-primary w-100">Применить</button></div>
+                <div class="col-md-3"><a class="btn btn-outline-secondary w-100" href="?page=recordings">Сбросить</a></div>
             </form>
         </div></div>
 
@@ -461,7 +467,7 @@ if ($page === 'dashboard') {
                         <video controls preload="metadata" src="stream.php?id=<?= (int) $record['id'] ?>"></video>
                         <div class="card-body">
                             <div class="d-flex justify-content-between gap-3">
-                                <div><h2 class="h5 mb-1"><?= h($record['last_name'] . ' ' . $record['first_name']) ?></h2><div class="text-secondary"><?= h($record['group_name']) ?> · код <?= h($record['code']) ?></div></div>
+                                <div><h2 class="h5 mb-1"><?= h($record['title']) ?></h2><div class="fw-semibold"><?= h($record['last_name'] . ' ' . $record['first_name']) ?></div><div class="text-secondary"><?= h($record['group_name']) ?> · код <?= h($record['code']) ?></div></div>
                                 <span class="badge text-bg-light align-self-start"><?= h(format_bytes((int) $record['file_size'])) ?></span>
                             </div>
                             <dl class="row small mt-3 mb-0">

@@ -63,6 +63,34 @@ function is_installed(): bool
     }
 }
 
+function ensure_recordings_title_column(): void
+{
+    static $done = false;
+    if ($done) return;
+
+    $pdo = db();
+    $driver = $pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
+    if ($driver === 'sqlite') {
+        $columns = $pdo->query('PRAGMA table_info(recordings)')->fetchAll();
+        $hasTitle = false;
+        foreach ($columns as $column) {
+            if (($column['name'] ?? '') === 'title') {
+                $hasTitle = true;
+                break;
+            }
+        }
+        if (!$hasTitle) {
+            $pdo->exec("ALTER TABLE recordings ADD COLUMN title TEXT NOT NULL DEFAULT 'Без названия'");
+        }
+    } else {
+        $stmt = $pdo->query("SHOW COLUMNS FROM recordings LIKE 'title'");
+        if (!$stmt->fetch()) {
+            $pdo->exec("ALTER TABLE recordings ADD COLUMN title VARCHAR(255) NOT NULL DEFAULT 'Без названия' AFTER student_id");
+        }
+    }
+    $done = true;
+}
+
 function h(?string $value): string
 {
     return htmlspecialchars((string) $value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
