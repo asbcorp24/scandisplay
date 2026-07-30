@@ -1,0 +1,98 @@
+name: Apply local FFmpeg path
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/ffmpeg-relative-path-trigger.txt
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Update client configuration
+        shell: python
+        run: |
+          from pathlib import Path
+
+          main = Path('client/src/main.cpp')
+          source = main.read_text(encoding='utf-8')
+
+          old = ('    g_config.baseUrl = ReadIni(configPath, L"server", L"base_url", L"");\n'
+                 '    g_config.ffmpegPath = ExpandEnvironment(ReadIni(configPath, L"recording", L"ffmpeg_path", L"ffmpeg.exe"));\n'
+                 '    g_config.outputDir = ExpandEnvironment(ReadIni(configPath, L"recording", L"output_dir", L"%LOCALAPPDATA%\\\\ScanDisplay\\\\recordings"));')
+          new = ('    g_config.baseUrl = ReadIni(configPath, L"server", L"base_url", L"");\n'
+                 '    const fs::path configuredFfmpeg = ExpandEnvironment(\n'
+                 '        ReadIni(configPath, L"recording", L"ffmpeg_path", L"ffmpeg.exe"));\n'
+                 '    g_config.ffmpegPath = (configuredFfmpeg.is_absolute()\n'
+                 '        ? configuredFfmpeg\n'
+                 '        : fs::path(ModuleDirectory()) / configuredFfmpeg).lexically_normal().wstring();\n'
+                 '    g_config.outputDir = ExpandEnvironment(ReadIni(configPath, L"recording", L"output_dir", L"%LOCALAPPDATA%\\\\ScanDisplay\\\\recordings"));')
+          if old not in source:
+              raise SystemExit('Expected FFmpeg config fragment not found')
+          main.write_text(source.replace(old, new, 1), encoding='utf-8')
+
+          config = Path('client/config.example.ini')
+          config_text = config.read_text(encoding='utf-8')
+          old_config = r'ffmpeg_path=C:\ffmpeg\bin\ffmpeg.exe'
+          if old_config not in config_text:
+              raise SystemExit('Expected config FFmpeg path not found')
+          config.write_text(config_text.replace(old_config, 'ffmpeg_path=ffmpeg.exe', 1), encoding='utf-8')
+
+          readme = Path('README.md')
+          text = readme.read_text(encoding='utf-8')
+          text = text.replace(r'ffmpeg_path=C:\ffmpeg\bin\ffmpeg.exe', 'ffmpeg_path=ffmpeg.exe')
+
+          old_folder = ('В папке должен находиться:\n\n'
+                        '```text\n'
+                        'C:\\ScanDisplay\\ScanDisplay.exe\n'
+                        '```')
+          new_folder = ('В рабочей папке должны находиться:\n\n'
+                        '```text\n'
+                        'C:\\ScanDisplay\\ScanDisplay.exe\n'
+                        'C:\\ScanDisplay\\ffmpeg.exe\n'
+                        'C:\\ScanDisplay\\config.ini\n'
+                        '```\n\n'
+                        '`ffmpeg.exe` нужно взять из установленного или скачанного комплекта FFmpeg и положить рядом с программой.')
+          if old_folder in text:
+              text = text.replace(old_folder, new_folder, 1)
+
+          old_copy = ('copy client\\build\\Release\\ScanDisplay.exe C:\\ScanDisplay\\ScanDisplay.exe\n'
+                      'copy client\\config.example.ini C:\\ScanDisplay\\config.ini')
+          new_copy = ('copy client\\build\\Release\\ScanDisplay.exe C:\\ScanDisplay\\ScanDisplay.exe\n'
+                      'copy client\\config.example.ini C:\\ScanDisplay\\config.ini\n'
+                      'copy C:\\ffmpeg\\bin\\ffmpeg.exe C:\\ScanDisplay\\ffmpeg.exe')
+          if old_copy in text:
+              text = text.replace(old_copy, new_copy, 1)
+
+          marker = ('`ffmpeg_path` — полный путь к `ffmpeg.exe`:\n\n'
+                    '```ini\n'
+                    'ffmpeg_path=ffmpeg.exe\n'
+                    '```')
+          replacement = ('`ffmpeg_path` — путь к `ffmpeg.exe`. Рекомендуется положить файл рядом с `ScanDisplay.exe` и указать только имя файла:\n\n'
+                         '```ini\n'
+                         'ffmpeg_path=ffmpeg.exe\n'
+                         '```\n\n'
+                         'Относительный путь автоматически вычисляется от папки `ScanDisplay.exe`, а не от текущей рабочей папки Windows. Абсолютные пути также поддерживаются.')
+          if marker in text:
+              text = text.replace(marker, replacement, 1)
+
+          readme.write_text(text, encoding='utf-8')
+
+      - name: Commit changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add client/src/main.cpp client/config.example.ini README.md
+          git commit -m "Resolve FFmpeg beside the client executable"
+          git push origin main
