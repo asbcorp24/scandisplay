@@ -29,7 +29,6 @@ target_link_libraries(ScanDisplay PRIVATE
     shell32
     comctl32
     ole32
-    bcrypt
 )
 
 install(TARGETS ScanDisplay RUNTIME DESTINATION .)
